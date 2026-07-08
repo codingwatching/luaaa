@@ -271,7 +271,7 @@ You've seen everything you need for day-to-day use. The **[Advanced Guide](GUIDE
 * Overloaded functions and disambiguation
 * Callbacks in depth (`std::function` vs raw pointers)
 * Metamethods (`__index`, `__newindex`, `__gc`, `__tostring`)
-* Multiple `lua_State`s and the `TAG` parameter
+* Multiple `lua_State`s
 * **Embedded / no-stdlib** builds for microcontrollers
 * Feature macros, GC ownership rules, and troubleshooting
 

@@ -271,7 +271,7 @@ c++ -std=c++11 example.cpp -I/usr/include/lua5.4 -llua5.4 -lm -o example && ./ex
 * 重载函数与消歧
 * 回调详解（`std::function` 对比原始指针）
 * 元方法（`__index`、`__newindex`、`__gc`、`__tostring`）
-* 多个 `lua_State` 与 `TAG` 参数
+* 多个 `lua_State`
 * 面向单片机的**嵌入式 / 无标准库**构建
 * 特性宏、GC 所有权规则与排错
 

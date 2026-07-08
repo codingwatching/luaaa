@@ -204,12 +204,12 @@ inline void LUAAA_DUMP(lua_State * L, const char * name = "") {
 
 #if LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT
 #   define luaaa_check_constructor_name_conflict(ctorName) { \
-        lua_getglobal(m_state, (LuaClass<TCLASS, TAG>::klassName(m_state))); \
+        lua_getglobal(m_state, (LuaClass<TCLASS>::klassName(m_state))); \
         if (!lua_isnil(m_state, -1)) { \
             lua_pushstring(m_state, ctorName); \
             lua_gettable(m_state, -2); \
             if (!lua_isnil(m_state, -1)) { \
-                printf("Error: LuaClass<%s>::ctor has duplicated name:`%s`\n", LuaClass<TCLASS, TAG>::klassName(m_state), ctorName);\
+                printf("Error: LuaClass<%s>::ctor has duplicated name:`%s`\n", LuaClass<TCLASS>::klassName(m_state), ctorName);\
             } \
             lua_pop(m_state, 1); \
         } \
@@ -353,7 +353,7 @@ namespace LUAAA_NS
     // Lua Class
     //========================================================
 
-    template <typename, int = 0> struct LuaClass;
+    template <typename> struct LuaClass;
 
     //========================================================
     // Lua stack operator
@@ -1291,7 +1291,7 @@ namespace LUAAA_NS
     //========================================================
     // export class
     //========================================================
-    template <typename TCLASS, int TAG>
+    template <typename TCLASS>
     struct LuaClass
     {
         friend struct DestructorCaller<TCLASS>;
@@ -1312,14 +1312,15 @@ namespace LUAAA_NS
 
             // Per-state check: the same C++ type may be bound under different names in
             // different lua_States, but binding it under two different names in the SAME
-            // state is a conflict (use LuaClass<CLASS, TAG> to disambiguate).
+            // state is unsupported (self / arguments are resolved by type, so the second
+            // name's objects could not be unpacked). Use a distinct wrapper type instead.
             const char * existing = klassName(state);
             if (existing != nullptr && strcmp(existing, name) != 0)
             {
 #if LUAAA_WITHOUT_CPP_STDLIB
-                luaL_argcheck(state, false, 1, "LuaClass<CLASS> name conflict, use LuaClass<CLASS, TAG> to identify them");
+                luaL_argcheck(state, false, 1, "LuaClass name conflict: this C++ type is already bound to another name in this state");
 #else
-                luaL_argcheck(state, false, 1, (std::string("C++ class `") + RTTI_CLASS_NAME(TCLASS) + "` bind to conflict lua name `" + name + "`, origin name: `" + existing + "`. use LuaClass<CLASS, TAG> to identify them.").c_str());
+                luaL_argcheck(state, false, 1, (std::string("C++ class `") + RTTI_CLASS_NAME(TCLASS) + "` bind to conflict lua name `" + name + "`, origin name: `" + existing + "`. bind it in a separate lua_State or wrap it in a distinct C++ type.").c_str());
 #endif
                 return;
             }
@@ -1327,7 +1328,7 @@ namespace LUAAA_NS
             struct HelperClass {
                 static int f__objgc(lua_State* state) {
                     if (lua_isuserdata(state, -1)) {
-                        auto uData = (UserDataDetail*)luaL_checkudata(state, -1, (LuaClass<TCLASS, TAG>::klassName(state)));
+                        auto uData = (UserDataDetail*)luaL_checkudata(state, -1, (LuaClass<TCLASS>::klassName(state)));
                         if (uData)
                         {
                             lua_getmetatable(state, -1);
@@ -1400,12 +1401,12 @@ namespace LUAAA_NS
                             if (lua_isfunction(state, -1))
                             {
                                 // Yes, there are something write-only, e.g., stdout, printer, digital io pin in output mode.
-                                luaL_error(state, "attempt to read Write-Only property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName(state));
+                                luaL_error(state, "attempt to read Write-Only property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
                             }
                             else
                             {
                                 // do nothing here. nil will be return.
-                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName(state));
+                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
                             }
                         }
                     }
@@ -1460,11 +1461,11 @@ namespace LUAAA_NS
                             lua_getfield(state, -1, internal_name);
                             if (lua_isfunction(state, -1))
                             {
-                                luaL_error(state, "attempt to write Read-Only property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName(state));
+                                luaL_error(state, "attempt to write Read-Only property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
                             }
                             else
                             {
-                                luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName(state));
+                                luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
                             }
                         }
                     }
@@ -1514,10 +1515,10 @@ namespace LUAAA_NS
 #endif
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const char * name = "new")
+        inline LuaClass<TCLASS>& ctor(const char * name = "new")
         {
             struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS, TAG>::UserDataDetail * uData) {
+                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail * uData) {
                     if (uData && uData->obj)
                     {
                         (uData->obj)->~TCLASS();
@@ -1526,7 +1527,7 @@ namespace LUAAA_NS
                 }
 
                 static int f_new(lua_State* state) {
-                    auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail) + sizeof(TCLASS));
+                    auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail) + sizeof(TCLASS));
                     if (uData)
                     {
                         TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, (void*)(uData + 1), 0);
@@ -1534,7 +1535,7 @@ namespace LUAAA_NS
                         {
                             uData->obj = obj;
                             uData->dtor = HelperClass::f_dtor;
-                            luaL_setmetatable(state, (LuaClass<TCLASS, TAG>::klassName(state)));
+                            luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
                             return 1;
                         }
                         lua_pop(state, 1);
@@ -1563,10 +1564,10 @@ namespace LUAAA_NS
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const char * name, TCLASS*(*spawner)(ARGS...)) {
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...)) {
             typedef decltype(spawner) SPAWNERFTYPE;
             struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS, TAG>::UserDataDetail* uData) {
+                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
                     if (uData && uData->obj)
                     {
                         DestructorCaller<TCLASS>::Invoke(uData->obj);
@@ -1578,7 +1579,7 @@ namespace LUAAA_NS
                     void * spawner = lua_touserdata(state, lua_upvalueindex(1));
                     luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
                     if (spawner) {
-                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1586,7 +1587,7 @@ namespace LUAAA_NS
                             {
                                 uData->obj = obj;
                                 uData->dtor = HelperClass::f_dtor;
-                                luaL_setmetatable(state, (LuaClass<TCLASS, TAG>::klassName(state)));
+                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
                                 return 1;
                             }
                             lua_pop(state, 1);
@@ -1634,12 +1635,12 @@ namespace LUAAA_NS
         }
 
         template<typename TRET, typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)){
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)){
             typedef decltype(spawner) SPAWNERFTYPE;
             typedef decltype(deleter) DELETERFTYPE;
 
             struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS, TAG>::UserDataDetail* uData) {
+                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
                     if (uData && uData->obj && uData->free_func)
                     {
                         (*(DELETERFTYPE*)(uData->free_func))(uData->obj);
@@ -1655,7 +1656,7 @@ namespace LUAAA_NS
                     luaL_argcheck(state, deleter, 2, "cpp closure deleter not found.");
 
                     if (spawner) {
-                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1664,7 +1665,7 @@ namespace LUAAA_NS
                                 uData->obj = obj;
                                 uData->dtor = HelperClass::f_dtor;
                                 uData->free_func = deleter;
-                                luaL_setmetatable(state, (LuaClass<TCLASS, TAG>::klassName(state)));
+                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
                                 return 1;
                             }
                             lua_pop(state, 1);
@@ -1725,7 +1726,7 @@ namespace LUAAA_NS
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
             typedef decltype(spawner) SPAWNERFTYPE;
 
             struct HelperClass {
@@ -1733,7 +1734,7 @@ namespace LUAAA_NS
                     void * spawner = lua_touserdata(state, lua_upvalueindex(1));
                     luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
                     if (spawner) {
-                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1741,7 +1742,7 @@ namespace LUAAA_NS
                             {
                                 uData->obj = obj;
                                 uData->dtor = nullptr;
-                                luaL_setmetatable(state, (LuaClass<TCLASS, TAG>::klassName(state)));
+                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
                                 return 1;
                             }
                             lua_pop(state, 1);
@@ -1791,30 +1792,30 @@ namespace LUAAA_NS
        
 #if !LUAAA_WITHOUT_CPP_STDLIB
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const std::string& name)
+        inline LuaClass<TCLASS>& ctor(const std::string& name)
         {
             return ctor<ARGS...>(name.c_str());
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...)) {
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...)) {
             return ctor(name.c_str(), spawner);
         }
 
         template<typename TRET, typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)) {
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)) {
             return ctor(name.c_str(), spawner, deleter);
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
             return ctor(name.c_str(), spawner, nullptr);
         }
 #endif
 
     private:
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& _registerClassFunction(const char* name, lua_CFunction caller, F f)
+        inline LuaClass<TCLASS>& _registerClassFunction(const char* name, lua_CFunction caller, F f)
         {
             luaL_getmetatable(m_state, klassName(m_state));
             if (strcmp(name, "__gc") == 0)
@@ -1861,44 +1862,44 @@ namespace LUAAA_NS
 
     private:
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& _funImpl(const char * name, F f)
+        inline LuaClass<TCLASS>& _funImpl(const char * name, F f)
         {
             return _registerClassFunction(name, MemberFunctionCaller(f), f);
         }
 
     public:
         template<typename FCLASS, typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, FRET(FCLASS::*f)(FARGS...))
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...))
         {
             return _funImpl(name, f);
         }
 
         template<typename FCLASS, typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, FRET(FCLASS::*f)(FARGS...) const)
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...) const)
         {
             return _funImpl(name, f);
         }
 
         template<typename FCLASS, typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, void(FCLASS::*f)(FARGS...))
+        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...))
         {
             return _funImpl(name, f);
         }
 
         template<typename FCLASS, typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, void(FCLASS::*f)(FARGS...) const)
+        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...) const)
         {
             return _funImpl(name, f);
         }
 
         template<typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, FRET(*f)(FARGS...))
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(*f)(FARGS...))
         {
             return _funImpl(name, f);
         }
 
         template<typename ...FARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, void(*f)(FARGS...))
+        inline LuaClass<TCLASS>& fun(const char * name, void(*f)(FARGS...))
         {
             return _funImpl(name, f);
         }
@@ -1906,25 +1907,25 @@ namespace LUAAA_NS
 #if !LUAAA_WITHOUT_CPP_STDLIB
         // register lambdas as lua class function
         template<typename TRET, typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, const std::function<TRET(ARGS...)>& f)
+        inline LuaClass<TCLASS>& fun(const char * name, const std::function<TRET(ARGS...)>& f)
         {
             return _funImpl<std::function<TRET(ARGS...)>>(name, f);
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, const std::function<void(ARGS...)>& f)
+        inline LuaClass<TCLASS>& fun(const char * name, const std::function<void(ARGS...)>& f)
         {
             return _funImpl<std::function<void(ARGS...)>>(name, f);
         }
 
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, F f)
+        inline LuaClass<TCLASS>& fun(const char * name, F f)
         {
             return fun(name, to_function(f));
         }
 #endif
 
-        inline LuaClass<TCLASS, TAG>& fun(const char * name, lua_CFunction f)
+        inline LuaClass<TCLASS>& fun(const char * name, lua_CFunction f)
         {
             luaL_getmetatable(m_state, klassName(m_state));
             if (strcmp(name, "__gc") == 0)
@@ -1952,7 +1953,7 @@ namespace LUAAA_NS
         }
 
         template <typename V>
-        inline LuaClass<TCLASS, TAG>& def(const char * name, const V& val)
+        inline LuaClass<TCLASS>& def(const char * name, const V& val)
         {
             luaL_getmetatable(m_state, klassName(m_state));
             lua_pushstring(m_state, name);
@@ -1963,7 +1964,7 @@ namespace LUAAA_NS
         }
 
         // disable cast from "const char [#]" to "char (*)[#]"
-        inline LuaClass<TCLASS, TAG>& def(const char* name, const char* str)
+        inline LuaClass<TCLASS>& def(const char* name, const char* str)
         {
             luaL_getmetatable(m_state, klassName(m_state));
             lua_pushstring(m_state, name);
@@ -1975,7 +1976,7 @@ namespace LUAAA_NS
       
     private:
         template <typename F>
-        inline LuaClass<TCLASS, TAG>& _getterImpl(const char* name, lua_CFunction invoker, F f)
+        inline LuaClass<TCLASS>& _getterImpl(const char* name, lua_CFunction invoker, F f)
         {
 #if LUAAA_FEATURE_PROPERTY
             char internal_name[256];
@@ -1987,7 +1988,7 @@ namespace LUAAA_NS
         }
 
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& _setterImpl(const char* name, lua_CFunction invoker, F f)
+        inline LuaClass<TCLASS>& _setterImpl(const char* name, lua_CFunction invoker, F f)
         {
 #if LUAAA_FEATURE_PROPERTY
             char internal_name[256];
@@ -2000,7 +2001,7 @@ namespace LUAAA_NS
 
     public:
         template<typename P>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, P(*f)())
+        inline LuaClass<TCLASS>& get(const char* name, P(*f)())
         {
             struct HelperClass {
                 typedef decltype(f) FTYPE;
@@ -2021,7 +2022,7 @@ namespace LUAAA_NS
         }
 
         template<typename P>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, P(*f)(const TCLASS&))
+        inline LuaClass<TCLASS>& get(const char* name, P(*f)(const TCLASS&))
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2042,7 +2043,7 @@ namespace LUAAA_NS
         }
 
         template<typename P, typename FCLASS>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, P(FCLASS::*f)()const)
+        inline LuaClass<TCLASS>& get(const char* name, P(FCLASS::*f)()const)
         {
             static_assert(std::is_same<typename std::decay<TCLASS>::type, typename std::decay<FCLASS>::type>::value, "Error: prop function can be member function of only associated class");
             struct HelperClass {
@@ -2065,7 +2066,7 @@ namespace LUAAA_NS
 
 
         template<typename P, typename TRET>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, TRET(*f)(P))
+        inline LuaClass<TCLASS>& set(const char* name, TRET(*f)(P))
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2082,7 +2083,7 @@ namespace LUAAA_NS
         }
 
         template<typename P, typename TRET, typename FCLASS>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, TRET(FCLASS::* f)(P))
+        inline LuaClass<TCLASS>& set(const char* name, TRET(FCLASS::* f)(P))
         {
             static_assert(std::is_same<typename std::decay<TCLASS>::type, typename std::decay<FCLASS>::type>::value, "prop function can be member function of only associated class");
             struct HelperClass {
@@ -2100,7 +2101,7 @@ namespace LUAAA_NS
         }
 
         template<typename P, typename TRET>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, TRET(*f)(TCLASS&, P))
+        inline LuaClass<TCLASS>& set(const char* name, TRET(*f)(TCLASS&, P))
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2121,7 +2122,7 @@ namespace LUAAA_NS
 #if !LUAAA_WITHOUT_CPP_STDLIB
         // access prop from lambdas
         template<typename P>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, std::function<P()> f)
+        inline LuaClass<TCLASS>& get(const char* name, std::function<P()> f)
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2142,7 +2143,7 @@ namespace LUAAA_NS
         }
 
         template<typename P>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, std::function<P(const TCLASS&)> f)
+        inline LuaClass<TCLASS>& get(const char* name, std::function<P(const TCLASS&)> f)
         {
             struct HelperClass {
                 
@@ -2164,7 +2165,7 @@ namespace LUAAA_NS
         }
 
         template<typename P>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, std::function<P(TCLASS&)> f)
+        inline LuaClass<TCLASS>& get(const char* name, std::function<P(TCLASS&)> f)
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2185,13 +2186,13 @@ namespace LUAAA_NS
         }
 
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& get(const char* name, F f)
+        inline LuaClass<TCLASS>& get(const char* name, F f)
         {
             return get(name, to_class_getter_function<TCLASS>(f));
         }
 
         template<typename P, typename TRET>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, std::function<TRET(P)> f)
+        inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(P)> f)
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2208,7 +2209,7 @@ namespace LUAAA_NS
         }
 
         template<typename P, typename TRET>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, std::function<TRET(TCLASS&, P)> f)
+        inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(TCLASS&, P)> f)
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2225,7 +2226,7 @@ namespace LUAAA_NS
         }
 
         template<typename P, typename TRET>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, std::function<TRET(const TCLASS&, P)> f)
+        inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(const TCLASS&, P)> f)
         {
             struct HelperClass {
                 static inline int Invoke(lua_State* state) {
@@ -2242,7 +2243,7 @@ namespace LUAAA_NS
         }
 
         //template<typename F>
-        //inline LuaClass<TCLASS, TAG>& set(const char* name, std::function<F> f)
+        //inline LuaClass<TCLASS>& set(const char* name, std::function<F> f)
         //{
         //    //static_assert(false, "Error: invalid signature of setter function");
         //    assert(!"Error: invalid signature of setter function");
@@ -2250,7 +2251,7 @@ namespace LUAAA_NS
         //}
 
         template<typename F>
-        inline LuaClass<TCLASS, TAG>& set(const char* name, F f)
+        inline LuaClass<TCLASS>& set(const char* name, F f)
         {
             return set(name, to_class_setter_function<TCLASS>(f));
         }
@@ -2259,25 +2260,25 @@ namespace LUAAA_NS
     public:
 #if !LUAAA_WITHOUT_CPP_STDLIB
         template <typename F>
-        inline LuaClass<TCLASS, TAG>& fun(const std::string& name, F f)
+        inline LuaClass<TCLASS>& fun(const std::string& name, F f)
         {
             return fun(name.c_str(), f);
         }
 
         template <typename V>
-        inline LuaClass<TCLASS, TAG>& def(const std::string& name, const V& val)
+        inline LuaClass<TCLASS>& def(const std::string& name, const V& val)
         {
             return def(name.c_str(), val);
         }
 
         template <typename F>
-        inline LuaClass<TCLASS, TAG>& get(const std::string& name, F f)
+        inline LuaClass<TCLASS>& get(const std::string& name, F f)
         {
             return get(name.c_str(), f);
         }
 
         template <typename F>
-        inline LuaClass<TCLASS, TAG>& set(const std::string& name, F f)
+        inline LuaClass<TCLASS>& set(const std::string& name, F f)
         {
             return set(name.c_str(), f);
         }
@@ -2287,7 +2288,7 @@ namespace LUAAA_NS
         lua_State * m_state;
 
     private:
-        // A per-<TCLASS,TAG> unique id: its address is used as a registry key. The lua
+        // A per-TCLASS unique id: its address is used as a registry key. The lua
         // name is stored per-state at registry[&s_typeKey], so the same C++ type can be
         // bound under different names in different (even coexisting) lua_States.
         static char s_typeKey;
@@ -2306,7 +2307,7 @@ namespace LUAAA_NS
         }
     };
 
-    template <typename TCLASS, int TAG> char LuaClass<TCLASS, TAG>::s_typeKey = 0;
+    template <typename TCLASS> char LuaClass<TCLASS>::s_typeKey = 0;
 
 
     // -----------------------------------
@@ -2407,7 +2408,7 @@ namespace LUAAA_NS
                             else
                             {
                                 // do nothing here. nil will be return.
-                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName(state));
+                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
                             }
                         }
                     }
@@ -2633,10 +2634,10 @@ namespace LUAAA_NS
             return (*this);
         }
 
-        template <typename TCLASS, int TAG>
-        inline LuaModule& def(const char* name, const luaaa::LuaClass<TCLASS, TAG>&, const TCLASS* obj = nullptr, void(*deleter)(TCLASS*) = nullptr)
+        template <typename TCLASS>
+        inline LuaModule& def(const char* name, const luaaa::LuaClass<TCLASS>&, const TCLASS* obj = nullptr, void(*deleter)(TCLASS*) = nullptr)
         {
-            typename LuaClass<TCLASS, TAG>::UserDataDetail userData{};
+            typename LuaClass<TCLASS>::UserDataDetail userData{};
             if (obj)
             {
                 userData.obj = const_cast<TCLASS*>(obj);
@@ -2644,7 +2645,7 @@ namespace LUAAA_NS
                 {
                     struct HelperClass
                     {
-                        static int f_dtor(typename LuaClass<TCLASS, TAG>::UserDataDetail* uData) {
+                        static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
                             typedef decltype(deleter) DELETERFTYPE;
                             if (uData && uData->obj && uData->free_func)
                             {
@@ -2668,7 +2669,7 @@ namespace LUAAA_NS
             {
                 struct HelperClass
                 {
-                    static int f_dtor(typename LuaClass<TCLASS, TAG>::UserDataDetail* uData)
+                    static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData)
                     {
                         if (uData && uData->obj)
                         {
@@ -2691,7 +2692,7 @@ namespace LUAAA_NS
                 lua_newtable(m_state);
                 _initMetaTable(m_state, -1);
             }
-            auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS, TAG>::UserDataDetail));
+            auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS>::UserDataDetail));
 #if LUAAA_WITHOUT_CPP_STDLIB
             luaL_argcheck(m_state, uData != nullptr, 1, "faild to alloc mem to store object");
 #else
@@ -2702,7 +2703,7 @@ namespace LUAAA_NS
                 uData->obj = userData.obj;
                 uData->dtor = userData.dtor;
                 uData->free_func = userData.free_func;
-                luaL_setmetatable(m_state, (LuaClass<TCLASS, TAG>::klassName(m_state)));
+                luaL_setmetatable(m_state, (LuaClass<TCLASS>::klassName(m_state)));
                 lua_pushstring(m_state, name);
                 lua_insert(m_state, -2);
                 lua_rawset(m_state, -3);
@@ -2715,13 +2716,13 @@ namespace LUAAA_NS
 #else
             luaL_Reg regtab = { nullptr, nullptr };
             luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS, TAG>::UserDataDetail));
+            auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS>::UserDataDetail));
             if (uData)
             {
                 uData->obj = userData.obj;
                 uData->dtor = userData.dtor;
                 uData->free_func = userData.free_func;
-                luaL_setmetatable(m_state, (LuaClass<TCLASS, TAG>::klassName(m_state)));
+                luaL_setmetatable(m_state, (LuaClass<TCLASS>::klassName(m_state)));
                 lua_pushstring(m_state, name);
                 lua_insert(m_state, -2);
                 lua_rawset(m_state, -3);
