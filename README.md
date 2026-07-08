@@ -1,429 +1,280 @@
+# luaaa
 
-## Introduction
+**English** | [中文](README.zh-CN.md) · Advanced guide: [GUIDE.md](GUIDE.md) | [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 
-Luaaa is a simple tool to bind c++ class to lua. 
+**Bind C++ classes and functions to Lua with a single header — no code generation, no wrapper boilerplate.**
 
-It was implemented intent to use only one header file, with simple interface, easy to integrate to existing project.
-
-With luaaa, you don't need to write wrapper codes for existing class/function, and you don't need to run any other tool to generate wrapper codes. Just define the class to export and enjoy using it in lua.
-
-Luaaa has no dependencies to other libs but lua and c++11 standard lib, no cpp files.
-
-To use it, just copy and include 'luaaa.hpp' in source file.
-
-feel free to report bugs.
-## Features
-
-* simple.
-* no wrapper codes.
-* works with lua from 5.1 to 5.4, and luajit.
-
-## Quick Start
-
-export a class to lua:
 ```cpp
+LuaClass<Cat>(L, "Cat")
+    .ctor<std::string>()
+    .fun("eat", &Cat::eat)
+    .get("name", &Cat::name).set("name", &Cat::setName);
+```
+```lua
+local c = Cat.new("Bingo")
+c:eat{ "fish", "milk" }
+c.name = "Bingo the Brave"
+```
 
-// include luaaa file
+That's the whole idea. Keep reading for a gentle, top-to-bottom tour.
+
+---
+
+## Table of contents
+
+1. [Why luaaa](#why-luaaa)
+2. [Requirements](#requirements)
+3. [Install](#install)
+4. [Quick start](#quick-start)
+5. [Binding member & static functions](#binding-member--static-functions)
+6. [Constructors](#constructors)
+7. [Properties](#properties)
+8. [Modules & globals](#modules--globals)
+9. [Inheritance in Lua](#inheritance-in-lua)
+10. [Lua functions as C++ callbacks](#lua-functions-as-c-callbacks)
+11. [Run the example](#run-the-example)
+12. [Where to next](#where-to-next)
+13. [License](#license)
+
+---
+
+## Why luaaa
+
+* **One header.** Copy `luaaa.hpp`, `#include` it, done. No build step, no `.cpp`, no external tool.
+* **No wrappers.** Bind your *existing* classes and functions directly — you don't rewrite them.
+* **Small surface.** Three names do almost everything: `LuaClass`, `LuaModule`, and (for custom types) `LuaStack`.
+* **Automatic conversions.** Numbers, strings, `std::string`, and every standard container flow between C++ and Lua for you.
+* **Portable.** Works with Lua 5.1 – 5.4 and LuaJIT, and has an embedded mode with no C++ standard library.
+
+## Requirements
+
+* A C++11 compiler (C++14 or newer unlocks a faster `std::tuple` path; still optional).
+* Lua 5.1, 5.2, 5.3, 5.4, or LuaJIT — headers and library available to your build.
+
+## Install
+
+luaaa is header-only. Drop `luaaa.hpp` into your project and include it:
+
+```cpp
+#include "luaaa.hpp"
+using namespace luaaa;   // optional, but the examples assume it
+```
+
+It needs nothing but Lua and the C++ standard library.
+
+## Quick start
+
+Say you already have this plain C++ class — it knows nothing about Lua:
+
+```cpp
+class Cat {
+public:
+    explicit Cat(const std::string& name) : m_name(name), m_age(1) {}
+    void eat(const std::list<std::string>& foods);   // takes a list
+    const std::string& name() const;
+    void setName(const std::string& n);
+private:
+    std::string m_name;
+    int m_age;
+};
+```
+
+Bind it to an already-created `lua_State* L`:
+
+```cpp
 #include "luaaa.hpp"
 using namespace luaaa;
 
+void bind(lua_State* L) {
+    LuaClass<Cat>(L, "Cat")          // expose C++ `Cat` to Lua as "Cat"
+        .ctor<std::string>()          // a constructor taking a string
+        .fun("eat", &Cat::eat)        // a method
+        .get("name", &Cat::name)      // a readable property...
+        .set("name", &Cat::setName);  // ...that is also writable
+}
+```
 
-// Your existing class
-class Cat
-{
+Now Lua can use it — the array passed to `eat` becomes a `std::list<std::string>` automatically:
+
+```lua
+local c = Cat.new("Bingo")     -- calls the C++ constructor
+c:eat{ "fish", "milk" }        -- Lua table -> std::list<std::string>
+print(c.name)                  --> Bingo
+c.name = "Bingo the Brave"     -- calls setName()
+```
+
+The object's lifetime is managed by Lua's garbage collector: when `c` is collected, `Cat`'s destructor runs.
+
+## Binding member & static functions
+
+`fun` binds anything callable: member functions, `static` members, free functions, lambdas.
+
+```cpp
+class Cat {
 public:
-	Cat();
-	virtual ~Cat();
-public:
-	void setName(const std::string&);
-	const std::string& getName() const;
-	void eat(const std::list<std::string>& foods);
-	static void speak(const std::string& w);
-	//...
-private:
-	//...
+    void eat(const std::list<std::string>&);   // member
+    static void meow(const std::string& who);  // static
+    std::string toString() const;              // for __tostring
 };
 
-
-lua_State * state; // create and init lua
-
-// To export it:
-LuaClass<Cat> luaCat(state, "AwesomeCat");
-luaCat.ctor<std::string>();
-luaCat.fun("setName", &Cat::setName);
-luaCat.fun("getName", &Cat::getName);
-luaCat.fun("eat", &Cat::eat);
-// static member fuction was exported as Lua class member fuction.
-// from Lua, call it as same as other member fuctions.
-luaCat.fun("speak", &Cat::speak);
-luaCat.def("tag", "Cat");
-
-// Done.
-
-```
-
-ok, then you can access lua class "AwesomeCat" from lua.
-```lua
-
-local cat = AwesomeCat.new("Bingo");
-cat:eat({"fish", "milk", "cookie", "odd thing" });
-cat:speak("Thanks!");
-
-```
-
-you can add property to AwesomeCat:
-```cpp
-luaCat.set("name", &Cat::setName);
-luaCat.get("name", &Cat::getName);
-luaCat.set("age", &Cat::setAge);
-luaCat.get("age", &Cat::getAge);
-```
-
-then you can access property from lua as below:
-```lua
-local oldName = cat.name;
-print("cat's old name:", oldName);
-cat.name = "NewName";
-print("cat's new name:", cat.name);
-```
-for the property getter, property type depends on the return value of getter function.
-
-property getter accepts a function likes below:
-```cpp
-// 1) member function of origin c++ class which has no parameter
-luaCat.get("name", &Cat::getName);
-
-// 2) global function which has no parameter
-//std::string getProp1() {
-//    return "whatever";
-//}
-luaCat.get("prop1", getProp1);
-
-// 3) global function which has origin c++ class as the only ONE parameter, parameter can be const or non-const.
-//std::string getProp2(const Cat& cat) {
-//    return cat.name;
-//}
-luaCat.get("prop2", getProp2);
-
-// 4) a lambda function which has no parameter
-luaCat.get("prop3", []() -> float { return 0.123f; });
-
-// 5) a lambda function which has origin c++ class as the only ONE parameter, parameter can be const or non-const.
-luaCat.get("prop4", [](Cat& cat) -> float { return cat.getWeight(); });
-
-```
-
-for the property setter, property type depends on the parameter of setter function.
-
-property setter accepts a function likes below:
-```cpp
-// 1) member function of origin c++ class which has only ONE parameter
-// in lua,
-//   cat.name = "some thing...";
-// will call c++ function:
-//   catObject.setName("some thing...");
-luaCat.set("name", &Cat::setName);
-// in lua,
-//   cat.age = 2;
-// will call c++ function:
-//   catObject.setAge(2);
-luaCat.set("age", &Cat::setAge);
-
-// 2) global function which has only ONE parameter
-//void setProp1(cons std::string p) {
-//    // do some thing...
-//}
-// in lua,
-//   cat.prop1 = "prop value";
-// will call c++ function:
-//   setProp1("prop value");
-luaCat.set("prop1", setProp1);
-
-// 3) global function which accepts an origin c++ class and an extra parameter, origin c++ class can be const or non-const.
-//void setProp2(Cat& cat, const std::string p) {
-//    cat.setName(p);
-//}
-// in lua,
-//   cat.prop2 = "prop value";
-// will call c++ function:
-//   setProp2(catObject, "prop value");
-luaCat.set("prop2", setProp2);
-
-// 4) lambda function which has only ONE parameter
-luaCat.set("prop3", [](float val) -> void { printf("set prop3=%f\n", val); });
-
-// 5) lambda function which accepts an origin c++ class and an extra parameter, origin c++ class can be const or non-const.
-luaCat.set("prop4", [](Cat& cat, float val) -> void { cat.setWeight(val); });
-```
-
-if a property has only getter, it's read-only, if it has only setter, it's write-only, or if has both setter and getter, it can be read&write.
-
-if write a read-only property, or read a write-only property from lua, a lua exception will be rised:
-
-for example, with below defination:
-```cpp
-LuaClass<Cat> luaCat(state, "AnotherCat");
-luaCat.ctor<std::string>();
-luaCat.set("name", &Cat::setName);
-luaCat.get("age", &Cat::getAge);
-```
-
-in lua:
-```lua
-local cat = AnotherCat.new("Orange");
-print("Cat name:", cat.name);
-```
-will rise below exception:
-```bash
-lua err: [string "console"]:79: attempt to read Write-Only property 'name' of 'AwesomeCat'
+LuaClass<Cat>(L, "Cat")
+    .ctor<std::string>()
+    .fun("eat",  &Cat::eat)
+    .fun("meow", &Cat::meow)              // a static member, bound like any method
+    .fun("__tostring", &Cat::toString)    // Lua metamethods work too
+    .fun("play", [](int minutes) {        // a lambda is fine
+        printf("played for %d min\n", minutes);
+    });
 ```
 
 ```lua
-local cat = AnotherCat.new("Orange");
-cat.age = 10;
-```
-will rise below exception:
-```bash
-lua err: [string "console"]:1: attempt to write Read-Only property 'age' of 'AwesomeCat'
-```
-
-
-to export constructors, for example, instance getter of singleton pattern:
-```cpp
-LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
-/// use class constructor as instance spawner, default destructor will be called from gc.
-luaWorld.ctor<std::string>();
-
-/// use static function as instance spawner, default destructor will be called from gc.
-luaWorld.ctor("newInstance", &SingletonWorld::newInstance);
-
-/// use static function as instance spawner and static function as delete function which be called from gc.
-luaWorld.ctor("managedInstance", &SingletonWorld::newInstance , &SingletonWorld::delInstance);
-
-/// for singleton pattern, set deleter(gc) to nullptr to avoid singleton instance be destroyed.
-luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
-```
-instance spawner and delete function can be static member function or global function,
-and delete function must accept one instance pointer which to be collect back or delete. 
-
-
-A 'ctor'(constructor) is always required for LuaClass, you can define more than one 'ctor'.
-In most case, a 'ctor' likes below is enought:
-```cpp
-LuaClass<XXX> luaCls(luaState, 'XXXname');
-luaCls.ctor(); 
+local c = Cat.new("Bingo")
+c:eat{ "fish" }
+c:meow("Bingo")        -- static members are called on an instance, too
+print(c)               -- __tostring: prints "Bingo (1y)"
+c:play(10)
 ```
 
-> above codes will define a lua object constructor named as 'new', in lua `XXXname.new()` equivalent to C++:
+> Note: a `static`/free function bound with `fun` is called like a method — `c:meow("Bingo")`. The instance in front of the colon is passed as a hidden `self` and skipped; the remaining arguments map to the function's parameters.
+
+## Constructors
+
+Every class needs at least one constructor. The template arguments are the C++ constructor's parameter types; the string names it on the Lua side (default `"new"`).
 
 ```cpp
-new XXX();
+LuaClass<Cat>(L, "Cat")
+    .ctor()                       // Cat.new()          -> new Cat()
+    .ctor<std::string>("create"); // Cat.create("Tom")  -> new Cat("Tom")
 ```
 
-> or change constructor name to 'create':
-
-```cpp
-luaCls.ctor("create");
-```
-
-> if C++ constructor is not the default constructor, add sigature to match C++ class constructor:
-
-```cpp
-luaCls.ctor<std::string>('create');
-```
-
-> which defines a lua object constructor named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
-
-```cpp
-new XXX("string param");
-```
-
-
-static member function, global fuctions or constant can be export in module.
-module has no constructor or destructor.
-```cpp
-
-#include "luaaa.hpp"
-using namespace luaaa;
-
-void func1(int);
-void func2(int, int, int);
-int  func3(int, const char *, float, int, int , float);
-bool globalFunc(const std::string&, const std::map<std::string, std::string>&);
-
-lua_State * state; 
-
-/*
- init lua state here...
-*/
-
-LuaModule(state, "moduleName") MyMod;
-MyMod.fun("func1", func1);
-MyMod
-.fun("func2", func2)
-.fun("func3", func3)
-.def("cstr", "this is cstring");
-
-// or export function or some value to global(just emit module name)
-LuaModule(state)
-.fun("globalFunc", globalFunc)
-.def("cint", 12345)
-.def("dict", std::set<std::string>({"cat", "dog", "cow"}));
-
-// etc...
-
-// Done.
-
-```
-
-ok, then access it from lua:
 ```lua
--- access module members
-MyMod.func1(123)
-MyMod.func2(123, "456", 523.3)
-MyMod.func3(123, "string or any can be cast to string", 1.23, "1000", "2000", "9.876")
-print(MyMod.cstr)
+local a = Cat.new()
+local b = Cat.create("Tom")
+```
 
--- call global function
-globalFunc("string or any thing can be cast to string", { key = "table will be cast to map"})
+You can register several constructors under different names. Factory functions, singletons, and custom deleters are covered in the [advanced guide](GUIDE.md#constructors-in-depth).
 
--- print global value 'dict' comes from c++
-for k,v in pairs(dict) do
-	print(tostring(k) .. " = " .. tostring(v))
+## Properties
+
+`get` and `set` turn C++ accessors into Lua fields, so Lua reads and writes them with plain `.field` syntax.
+
+```cpp
+LuaClass<Cat>(L, "Cat")
+    .ctor<std::string>()
+    .get("name", &Cat::name).set("name", &Cat::setName)   // read + write
+    .get("age",  &Cat::age ).set("age",  &Cat::setAge);
+```
+
+```lua
+local c = Cat.new("Bingo")
+print(c.name)      -- calls name()
+c.age = 3          -- calls setAge(3)
+```
+
+* Only a getter → **read-only** (writing raises a Lua error).
+* Only a setter → **write-only** (reading raises a Lua error).
+* Both → read/write.
+
+Getters and setters can also be free functions or lambdas (with or without a `Cat&` first parameter). See [Properties in depth](GUIDE.md#properties-in-depth).
+
+## Modules & globals
+
+A `LuaModule` groups free functions and constants under one Lua table — handy for things that aren't tied to an object.
+
+```cpp
+void adopt(const std::string& name, std::function<void(const std::string&)> onDone);
+
+LuaModule(L, "shelter")
+    .def("city",     "Catville")   // a constant
+    .def("capacity", 50)
+    .fun("adopt", adopt);          // a free function
+```
+
+```lua
+print(shelter.city)            --> Catville
+shelter.adopt("Bingo", function(who) print(who .. " adopted!") end)
+```
+
+Give the module no name (or `"_G"`) to put things straight into Lua's globals:
+
+```cpp
+LuaModule(L).def("pi", 3.14159);   // global `pi`
+```
+
+## Inheritance in Lua
+
+As soon as you bind any class, luaaa injects two helpers into that `lua_State` — no glue to paste:
+
+* `luaaa:extend(Base, fields)` — make a subclass of an exported class (`fields` optional).
+* `luaaa:base(obj)` — get the underlying C++ object of an instance (to call an overridden method).
+
+```lua
+local SpecialCat = luaaa:extend(Cat, { tricks = 0 })
+
+function SpecialCat:learn() self.tricks = self.tricks + 1 end
+
+function SpecialCat:meow(who)          -- override...
+    print(self.name .. " purrs first")
+    luaaa:base(self):meow(who)         -- ...then call the C++ method
 end
 
+local felix = SpecialCat:new("Felix")
+felix:learn()
+felix:meow("Felix")
 ```
 
-to export c++ functions with same name, for example:
+## Lua functions as C++ callbacks
+
+A C++ function can accept a Lua function. Just declare the parameter as a `std::function` (preferred) or a plain function pointer:
+
 ```cpp
- bool samename(const std::string&);
- void samename(int);
-
- class MyClass
- {
- public:
- 	void sameNameFunc(int, int);
- 	void sameNameFunc(int);
- 	bool sameNameFunc();
- };
-```
-in this case, function signature is required here to know which function should be exported:
-```cpp
-MyMod.fun("func1", (bool(*)(const std::string&)) samename);
-MyMod.fun("func2", (void(*)(int)) samename);
-
-LuaClass<MyCLass>(state, "MyClass")
-	.fun("sameNameFunc1", (void(MyClass::*)(int, int)) &MyClass::sameNameFunc)
-	.fun("sameNameFunc2", (void(MyClass::*)(int) &MyClass::sameNameFunc))
-	.fun("sameNameFunc3", (bool(MyClass::*)() &MyClass::sameNameFunc));
+void onEach(std::function<int(int)> cb);   // preferred
+void onEvent(int (*cb)(const char*));      // raw pointer (limited)
 ```
 
-to export lambda function:
-```cpp
-MyMod.fun("lambdaFunc", [](int a, int b) -> int {
-    return a * b;
-});
-```
-
-
-
-
-to extend exported lua class, add below codes to your project:
 ```lua
--- put utility functions to name space 'luaaa'
-luaaa = {}
-
--- create subclass for base, obj can be exist table or nil
-function luaaa:extend(base, obj)
-	derived = obj or {}
-	derived.new = function(self, ...)
-		o = base.new(...)
-		setmetatable(self, getmetatable(o))
-		self["@"] = o
-		return self
-	end
-	return derived
-end
-
--- get base class of obj
-function luaaa:base(obj)
-	if (type(obj) == "table") then
-		return obj["@"]
-	end
-	return nil
-end
-
+onEach(function(x) return x * 2 end)
 ```
 
-extends exported lua class as below:
-```lua
-SpecialCat = luaaa:extend(AwesomeCat, {value = 1})
--- or:
---   SpecialCat = luaaa:extend(AwesomeCat)
--- in this case there no attribute was extended
+Prefer the `std::function` form: it owns its own reference to the Lua function, so it can be stored, copied, called many times, and re-entered. The differences and the caveats of the raw-pointer form are explained in [Callbacks in depth](GUIDE.md#callbacks-in-depth).
 
-function SpecialCat:onlyInSpecial()
-    print(self:getName() .. " has a special cat function")
-    print("Special cat " .. self:getName() .." has value:" .. self.value)
-end
+## Run the example
 
-function SpecialCat:speak(text)
-    print("Special cat[" .. self:getName() .. "] says: " .. text)
-    -- call override base method:
-	luaaa:base(self):speak(text)
-end
-```
+The [`example/`](example/) folder contains a complete, runnable story — *The Little Cat Shelter* — plus an embedded (no-stdlib) variant, *The Feeder Node*.
 
-then use SpecialCat:
-```lua
-xxx = SpecialCat:new("xxx")
-xxx:speak("I am a special cat.")
-xxx:onlyInSpecial()
-```
-
-## Advanced Topic
-
-
-
-## Run Example
-
-### 1. Linux / Unix / Macos
-
-1. install lua dev libs
 ```bash
-# debian/ubuntu
-$ sudo apt install lua5.3-dev
-# redhat/centos/fedora
-$ sudo yum install lua5.3-dev
+bash example/build.sh            # build & run both
+bash example/build.sh desktop    # only the full std-lib example
+bash example/build.sh embedded   # only the no-stdlib example
 ```
 
+The script auto-detects Lua via `pkg-config`. If it can't find your Lua, point it at the right paths:
 
-2. build & run.
 ```bash
-$ cd example
-$ g++ -std=c++11  example.cpp -I/usr/include/lua5.3 -o example -g -lstdc++ -llua5.3
-$ ./example
+LUA_CFLAGS=-I/usr/include/lua5.4 LUA_LIBS=-llua5.4 bash example/build.sh
 ```
 
-or use LLVM:
+Or compile by hand:
+
 ```bash
-$ cd example
-$ clang -std=c++11  example.cpp -I/usr/include/lua5.3 -o example -g -lstdc++ -llua5.3
-$ ./example
+cd example
+c++ -std=c++11 example.cpp -I/usr/include/lua5.4 -llua5.4 -lm -o example && ./example
 ```
 
-for embedded device, declare 'LUAAA_WITHOUT_CPP_STDLIB' to disable c++ stdlib.
-```
-$ cd example
-$ gcc -fno-exceptions -fno-rtti -std=c++11 embedded.cpp -I/usr/include/lua5.3 -o embedded -g  -llua5.3 -DLUAAA_WITHOUT_CPP_STDLIB
-$ ./embedded
-```
+## Where to next
 
-### 2. Visual C++
+You've seen everything you need for day-to-day use. The **[Advanced Guide](GUIDE.md)** covers the rest, as a reference and FAQ:
 
-Of course you know how to do it.
-
+* Automatic type conversions and the full container/`pair`/`tuple` support table
+* Teaching luaaa your own types with `LuaStack`
+* Constructor variants: factories, singletons, custom deleters, name conflicts
+* Overloaded functions and disambiguation
+* Callbacks in depth (`std::function` vs raw pointers)
+* Metamethods (`__index`, `__newindex`, `__gc`, `__tostring`)
+* Multiple `lua_State`s and the `TAG` parameter
+* **Embedded / no-stdlib** builds for microcontrollers
+* Feature macros, GC ownership rules, and troubleshooting
 
 ## License
 
-See the LICENSE file.
+MIT. See [LICENSE](LICENSE).
