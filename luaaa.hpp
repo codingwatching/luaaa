@@ -10,7 +10,7 @@
 
 #define LUAAA_NS luaaa
 #define LUAAA_VER_MAJOR (1)
-#define LUAAA_VER_MINOR (4)
+#define LUAAA_VER_MINOR (5)
 
 /// if you want to disable C++ std libs, set to 1
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
@@ -29,6 +29,12 @@
 
 #ifndef LUAAA_FEATURE_PROPERTY
 #define LUAAA_FEATURE_PROPERTY 1
+#endif
+
+/// enable built-in lua-side inheritance helpers (luaaa:extend / luaaa:base).
+/// any lua_State that binds a LuaClass gets them injected automatically (once).
+#ifndef LUAAA_FEATURE_EXTEND
+#define LUAAA_FEATURE_EXTEND 1
 #endif
 
 extern "C"
@@ -81,6 +87,7 @@ inline void lua_rawsetp(lua_State * L, int idx, const void * p) {
 #include <cassert>
 #include <typeinfo>
 #include <utility>
+#include <new>          // placement new for storing callables in holder userdata
 
 #if defined(_MSC_VER)
 #   define RTTI_CLASS_NAME(a) typeid(a).name() //vc always has this operator even if RTTI was disabled.
@@ -94,13 +101,17 @@ inline void lua_rawsetp(lua_State * L, int idx, const void * p) {
 
 #if LUAAA_WITHOUT_CPP_STDLIB
 #   include <type_traits>
+#   include <limits>       // numeric_limits: overflow checks for floating types
 #   include <cstring>
 #else
 #   if defined(__GNUC__)
 #       include <cstring>
 #   endif
+#   include <type_traits>
+#   include <limits>       // numeric_limits: overflow checks for floating types
 #   include <string>
 #   include <functional>
+#   include <memory>
 #endif
 
 #if LUAAA_DEBUG
@@ -348,7 +359,7 @@ namespace LUAAA_NS
     // Lua stack operator
     //========================================================
 
-    template <typename T> struct LuaStack
+    template <typename T, typename = void> struct LuaStack
     {
         inline static T& get(lua_State * state, int idx)
         {
@@ -454,14 +465,35 @@ namespace LUAAA_NS
         }
     };
 
-    template<>
-    struct LuaStack<float>
+    // Generic floating-point support (float, double, long double). Like the
+    // integer partial above it is keyed on a trait, excludes cv/reference forms,
+    // and folds every FP type onto one definition -- so `long double` is usable.
+    //
+    // Overflow is checked against lua_Number (Lua's number type) at run time:
+    //   * get: a Lua number that does not fit the narrower C++ target
+    //          (e.g. a double-valued lua_Number into a `float`) raises an error;
+    //   * put: a C++ value outside lua_Number's range
+    //          (e.g. a huge `long double` when lua_Number is double) raises an error.
+    // Where the C++ type is at least as wide as lua_Number the guard bound
+    // becomes +inf, so it never triggers a false positive. Precision loss within
+    // range (mantissa truncation, or any FP on Lua 5.1/5.2/LuaJIT) is inherent to
+    // Lua and is not reported.
+    template<typename T>
+    struct LuaStack<T, typename std::enable_if<
+        std::is_floating_point<T>::value
+        && std::is_same<T, typename std::remove_cv<T>::type>::value>::type>
     {
-        inline static float get(lua_State * L, int idx)
+        inline static T get(lua_State * L, int idx)
         {
             if (lua_isnumber(L, idx) || lua_isstring(L, idx))
             {
-                return float(lua_tonumber(L, idx));
+                const lua_Number v = lua_tonumber(L, idx);
+                const lua_Number hi = static_cast<lua_Number>(std::numeric_limits<T>::max());
+                if (v > hi || v < -hi)
+                {
+                    luaL_error(L, "number overflow: value does not fit target floating type");
+                }
+                return static_cast<T>(v);
             }
             else
             {
@@ -470,53 +502,14 @@ namespace LUAAA_NS
             return 0;
         }
 
-        inline static void put(lua_State * L, const float & t)
+        inline static void put(lua_State * L, const T & t)
         {
-            lua_pushnumber(L, t);
-        }
-    };
-
-    template<>
-    struct LuaStack<double>
-    {
-        inline static double get(lua_State * L, int idx)
-        {
-            if (lua_isnumber(L, idx) || lua_isstring(L, idx))
+            const T hi = static_cast<T>(std::numeric_limits<lua_Number>::max());
+            if (t > hi || t < -hi)
             {
-                return double(lua_tonumber(L, idx));
+                luaL_error(L, "number overflow: value out of lua_Number range");
             }
-            else
-            {
-                luaL_checktype(L, idx, LUA_TNUMBER);
-            }
-            return 0;
-        }
-
-        inline static void put(lua_State * L, const double & t)
-        {
-            lua_pushnumber(L, t);
-        }
-    };
-
-    template<>
-    struct LuaStack<int>
-    {
-        inline static int get(lua_State * L, int idx)
-        {
-            if (lua_isnumber(L, idx) || lua_isstring(L, idx))
-            {
-                return int(lua_tointeger(L, idx));
-            }
-            else
-            {
-                luaL_checktype(L, idx, LUA_TNUMBER);
-            }
-            return 0;
-        }
-
-        inline static void put(lua_State * L, const int & t)
-        {
-            lua_pushinteger(L, t);
+            lua_pushnumber(L, static_cast<lua_Number>(t));
         }
     };
 
@@ -532,6 +525,44 @@ namespace LUAAA_NS
         inline static void put(lua_State * L, const bool & t)
         {
             lua_pushboolean(L, t);
+        }
+    };
+
+    // Generic integer support for arithmetic types that don't have an explicit
+    // specialization above (long, unsigned, long long, short, char, size_t, ...).
+    // It is keyed on a type trait, so platform-dependent typedef aliases such as
+    // size_t / int64_t / intptr_t all collapse onto this ONE partial
+    // specialization -- there is no per-alias definition to collide across
+    // LP64 / LLP64 / ILP32 targets. `bool` and cv-qualified/reference forms are
+    // excluded so the explicit `int` specialization and the `const T` / `T&`
+    // forwarders keep priority.
+    //
+    // Precision note: a value outside lua_Integer's range -- e.g. a large
+    // unsigned 64-bit value, or ANY 64-bit value on Lua 5.1/5.2/LuaJIT where
+    // numbers are doubles -- is truncated/rounded. That is an inherent Lua
+    // limitation, not something this converter can avoid.
+    template<typename T>
+    struct LuaStack<T, typename std::enable_if<
+        std::is_integral<T>::value
+        && !std::is_same<T, bool>::value
+        && std::is_same<T, typename std::remove_cv<T>::type>::value>::type>
+    {
+        inline static T get(lua_State * L, int idx)
+        {
+            if (lua_isnumber(L, idx) || lua_isstring(L, idx))
+            {
+                return static_cast<T>(lua_tointeger(L, idx));
+            }
+            else
+            {
+                luaL_checktype(L, idx, LUA_TNUMBER);
+            }
+            return 0;
+        }
+
+        inline static void put(lua_State * L, const T & t)
+        {
+            lua_pushinteger(L, static_cast<lua_Integer>(t));
         }
     };
 
@@ -614,6 +645,13 @@ namespace LUAAA_NS
     }
 
 
+// Raw function-pointer callback: a non-capturing function pointer cannot carry
+// context, so (L, ref) live in per-signature `static` slots. Consequence (H2, a C++
+// language limitation): only ONE callback of a given signature can be live at a time
+// and it is not re-entrant/thread-safe -- registering another same-signature callback
+// overwrites the slot. For multiple / re-entrant callbacks use std::function instead.
+// (H1 is fixed: the ref is no longer unref'd after the first call, so a single
+// callback may be invoked repeatedly; the ref then leaks until the state is closed.)
 #define IMPLEMENT_CALLBACK_INVOKER(CALLCONV) \
     template<typename RET, typename ...ARGS> \
     struct LuaStack<RET(CALLCONV*)(ARGS...)> \
@@ -635,13 +673,10 @@ namespace LUAAA_NS
                         { \
                             lua_error(cacheLuaState); \
                         } \
-                        luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
                     } \
-                    else \
-                    { \
-                        lua_pushnil(cacheLuaState); \
-                    } \
-                    return LuaStack<RET>::get(cacheLuaState, lua_gettop(cacheLuaState)); \
+                    RET r = LuaStack<RET>::get(cacheLuaState, lua_gettop(cacheLuaState)); \
+                    lua_pop(cacheLuaState, 1); \
+                    return r; \
                 } \
             }; \
             if (lua_isfunction(L, idx)) \
@@ -674,13 +709,15 @@ namespace LUAAA_NS
                     if (lua_isfunction(cacheLuaState, -1)) \
                     { \
                         int initParams[] = { (LuaStack<ARGS>::put(cacheLuaState, args), 0)..., 0 }; (void)initParams; \
-                        if (lua_pcall(cacheLuaState, sizeof...(ARGS), 1, 0) != 0) \
+                        if (lua_pcall(cacheLuaState, sizeof...(ARGS), 0, 0) != 0) \
                         { \
                             lua_error(cacheLuaState); \
                         } \
-                        luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
                     } \
-                    return; \
+                    else \
+                    { \
+                        lua_pop(cacheLuaState, 1); \
+                    } \
                 } \
             }; \
             if (lua_isfunction(L, idx)) \
@@ -699,83 +736,67 @@ namespace LUAAA_NS
     };
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
+    // std::function callback: a captured lambda carries (L, ref) per callback, so it
+    // supports being called multiple times, multiple callbacks of the same signature
+    // living at once, and re-entrancy. The lua ref is released only when the callback
+    // object (and all its copies) is destroyed, via a shared_ptr guard.
+    // NOTE: the callback must not outlive its lua_State (the deleter calls luaL_unref).
     template<typename RET, typename ...ARGS>
     struct LuaStack<std::function<RET(ARGS...)>>
     {
         typedef std::function<RET(ARGS...)> FTYPE;
         inline static FTYPE get(lua_State * L, int idx)
         {
-            static lua_State * cacheLuaState = nullptr;
-            static int cacheLuaFuncId = 0;
-            struct HelperClass
+            if (!lua_isfunction(L, idx))
             {
-                static RET f_callback(ARGS... args)
-                {
-                    lua_rawgeti(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId);
-                    if (lua_isfunction(cacheLuaState, -1))
-                    {
-                        int initParams[] = { (LuaStack<ARGS>::put(cacheLuaState, args), 0)..., 0 }; (void)initParams;
-                        if (lua_pcall(cacheLuaState, sizeof...(ARGS), 1, 0) != 0)
-                        {
-                            lua_error(cacheLuaState);
-                        }
-                        luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId);
-                    }
-                    else
-                    {
-                        lua_pushnil(cacheLuaState);
-                    }
-                    return LuaStack<RET>::get(cacheLuaState, lua_gettop(cacheLuaState));
-                }
-            };
-            if (lua_isfunction(L, idx))
-            {
-                cacheLuaState = L;
-                lua_pushvalue(L, idx);
-                cacheLuaFuncId = luaL_ref(L, LUA_REGISTRYINDEX);
-                return HelperClass::f_callback;
+                return nullptr;
             }
-            return nullptr;
+            lua_pushvalue(L, idx);
+            int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            std::shared_ptr<void> guard(nullptr, [L, ref](void*) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            });
+            return [L, ref, guard](ARGS... args) -> RET {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                int initParams[] = { (LuaStack<ARGS>::put(L, args), 0)..., 0 }; (void)initParams;
+                if (lua_pcall(L, sizeof...(ARGS), 1, 0) != 0)
+                {
+                    lua_error(L);
+                }
+                RET r = LuaStack<RET>::get(L, lua_gettop(L));
+                lua_pop(L, 1);   // keep the stack balanced across repeated calls
+                return r;
+            };
         }
         inline void put(lua_State * L, FTYPE f)
         {
             lua_pushcfunction(L, NonMemberFunctionCaller(f));
         }
     };
-    
+
     template<typename ...ARGS>
     struct LuaStack<std::function<void(ARGS...)>>
     {
         typedef std::function<void(ARGS...)> FTYPE;
         inline static FTYPE get(lua_State * L, int idx)
         {
-            static lua_State * cacheLuaState = nullptr;
-            static int cacheLuaFuncId = 0;
-            struct HelperClass
+            if (!lua_isfunction(L, idx))
             {
-                static void f_callback(ARGS... args)
+                return nullptr;
+            }
+            lua_pushvalue(L, idx);
+            int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            std::shared_ptr<void> guard(nullptr, [L, ref](void*) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            });
+            return [L, ref, guard](ARGS... args) -> void {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                int initParams[] = { (LuaStack<ARGS>::put(L, args), 0)..., 0 }; (void)initParams;
+                if (lua_pcall(L, sizeof...(ARGS), 0, 0) != 0)
                 {
-                    lua_rawgeti(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId);
-                    if (lua_isfunction(cacheLuaState, -1))
-                    {
-                        int initParams[] = { (LuaStack<ARGS>::put(cacheLuaState, args), 0)..., 0 };
-                        if (lua_pcall(cacheLuaState, sizeof...(ARGS), 1, 0) != 0)
-                        {
-                            lua_error(cacheLuaState);
-                        }
-                        luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId);
-                    }
-                    return;
+                    lua_error(L);
                 }
             };
-            if (lua_isfunction(L, idx))
-            {
-                cacheLuaState = L;
-                lua_pushvalue(L, idx);
-                cacheLuaFuncId = luaL_ref(L, LUA_REGISTRYINDEX);
-                return HelperClass::f_callback;
-            }
-            return nullptr;
         }
         inline void put(lua_State * L, FTYPE f)
         {
@@ -1133,13 +1154,148 @@ namespace LUAAA_NS
     };
 
     //========================================================
+    // holder finalizer
+    //========================================================
+    // Attach a __gc to the holder userdata on top of the stack so F's destructor
+    // runs when the holder is collected. Only non-trivially-destructible F (e.g.
+    // std::function) needs this; trivial holders (function pointers) skip it, so
+    // the no-stdlib/embedded build has zero overhead.
+    template <typename F>
+    inline void AttachHolderFinalizer(lua_State* L)
+    {
+#if !LUAAA_WITHOUT_CPP_STDLIB
+        if (!std::is_trivially_destructible<F>::value)
+        {
+            struct Holder {
+                static int f_gc(lua_State* s) {
+                    F* p = (F*)lua_touserdata(s, 1);
+                    if (p) { p->~F(); }
+                    return 0;
+                }
+            };
+            lua_newtable(L);                       // [.., ud, mt]
+            lua_pushcfunction(L, Holder::f_gc);    // [.., ud, mt, fn]
+            lua_setfield(L, -2, "__gc");           // [.., ud, mt]
+            lua_setmetatable(L, -2);               // [.., ud] (mt already holds __gc before set: satisfies 5.4+ finalizer rule)
+        }
+#else
+        (void)L;
+#endif
+    }
+
+    //========================================================
+    // built-in lua-side inheritance helpers (luaaa:extend / luaaa:base)
+    //========================================================
+#if LUAAA_FEATURE_EXTEND
+    // instance constructor of a subclass created via luaaa:extend.
+    // upvalue(1) = base class table. mirrors the reference lua helper:
+    //   function(self, ...) local o=base.new(...);
+    //                       setmetatable(self, getmetatable(o)); self["@"]=o; return self end
+    inline int f_extend_derived_new(lua_State* L)
+    {
+        const int nargs = lua_gettop(L);            // self + ctor args
+        lua_pushvalue(L, lua_upvalueindex(1));      // base
+        lua_getfield(L, -1, "new");                 // base, base.new
+        lua_remove(L, -2);                          // base.new
+        for (int i = 2; i <= nargs; ++i)            // forward ctor args (skip self)
+        {
+            lua_pushvalue(L, i);
+        }
+        lua_call(L, nargs - 1, 1);                  // o = base.new(...)
+        // setmetatable(self, getmetatable(o))
+        if (lua_getmetatable(L, -1))                // o, mt
+        {
+            lua_setmetatable(L, 1);                 // o
+        }
+        // self["@"] = o
+        lua_setfield(L, 1, "@");                    // (empty extra)
+        lua_pushvalue(L, 1);                        // return self
+        return 1;
+    }
+
+    // luaaa:extend(base, obj) -> derived. colon-call: self=1, base=2, obj=3.
+    inline int f_extend(lua_State* L)
+    {
+        luaL_checktype(L, 2, LUA_TTABLE);           // base
+        if (lua_isnoneornil(L, 3))
+        {
+            lua_newtable(L);                        // derived = {}
+        }
+        else
+        {
+            luaL_checktype(L, 3, LUA_TTABLE);
+            lua_pushvalue(L, 3);                    // derived = obj
+        }
+        lua_pushvalue(L, 2);                        // base (upvalue)
+        lua_pushcclosure(L, f_extend_derived_new, 1);
+        lua_setfield(L, -2, "new");                 // derived.new = <closure>
+        return 1;                                   // return derived
+    }
+
+    // luaaa:base(obj) -> obj["@"] (the bound C++ object) or nil. colon-call: self=1, obj=2.
+    inline int f_extend_base(lua_State* L)
+    {
+        if (lua_istable(L, 2))
+        {
+            lua_getfield(L, 2, "@");
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
+        return 1;
+    }
+
+    // Inject the `luaaa` table with extend/base into L, once per state.
+    // Respects any user-defined luaaa.extend / luaaa.base (only fills gaps).
+    inline void installExtendHelper(lua_State* L)
+    {
+        static char s_extendKey = 0;
+        if (lua_rawgetp(L, LUA_REGISTRYINDEX, &s_extendKey) != LUA_TNIL)
+        {
+            lua_pop(L, 1);                          // already installed
+            return;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "luaaa");                  // reuse existing global if present
+        if (!lua_istable(L, -1))
+        {
+            lua_pop(L, 1);
+            lua_newtable(L);
+        }
+
+        lua_getfield(L, -1, "extend");
+        if (lua_isnil(L, -1))
+        {
+            lua_pushcfunction(L, f_extend);
+            lua_setfield(L, -3, "extend");
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "base");
+        if (lua_isnil(L, -1))
+        {
+            lua_pushcfunction(L, f_extend_base);
+            lua_setfield(L, -3, "base");
+        }
+        lua_pop(L, 1);
+
+        lua_setglobal(L, "luaaa");
+
+        lua_pushboolean(L, 1);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &s_extendKey);
+    }
+#endif
+
+    //========================================================
     // export class
     //========================================================
     template <typename TCLASS, int TAG>
     struct LuaClass
     {
         friend struct DestructorCaller<TCLASS>;
-        template<typename> friend struct LuaStack;
+        template<typename, typename> friend struct LuaStack;
         friend struct LuaModule;
 
         typedef struct _UserDataDetail {
@@ -1344,6 +1500,11 @@ namespace LUAAA_NS
             }
 
             lua_pop(state, 1);
+
+#if LUAAA_FEATURE_EXTEND
+            // any state that binds a class gets luaaa:extend / luaaa:base (once).
+            installExtendHelper(state);
+#endif
         }
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
@@ -1686,6 +1847,7 @@ namespace LUAAA_NS
                 // placement-new: F may be non-trivially-copyable (e.g. std::function),
                 // memset + operator= on unconstructed storage would be UB.
                 new (funPtr) F(f);
+                AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
                 lua_pushcclosure(m_state, caller, 1);
                 lua_settable(m_state, -3);
                 lua_pop(m_state, 1);
@@ -2355,6 +2517,7 @@ namespace LUAAA_NS
             }
 
             new (funPtr) F(f);
+            AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
 
             lua_pushvalue(m_state, -1);
             lua_pushcclosure(m_state, caller, 1);
@@ -2374,6 +2537,7 @@ namespace LUAAA_NS
             if (funPtr)
             {
                 new (funPtr) F(f);
+                AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
                 luaL_openlib(m_state, m_moduleName, regtab, 1);
             }
 #endif
