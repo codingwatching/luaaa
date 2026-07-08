@@ -28,11 +28,13 @@
 ### M3 增强（per-state registry，支持并存 state 不同名）
 
 第二轮的 M3 曾用「进程级持久 `klassName`」实现，只支持并存 state **同名**（不同名需 `TAG`）。本轮进一步重构为 **per-state registry**：
-- 每个 `LuaClass<TCLASS,TAG>` 有一个唯一静态地址 `&s_typeKey` 作类型标识；lua 名存到**该 state** 的 `registry[&s_typeKey]`。
+- 每个 `LuaClass<TCLASS>` 有一个唯一静态地址 `&s_typeKey` 作类型标识；lua 名存到**该 state** 的 `registry[&s_typeKey]`。
 - `klassName(lua_State*)` 从当前 state 取名——因此**同一 C++ 类型可在不同（甚至并存）state 中用不同 lua 名绑定**，各 state 只认自己的名字。
 - 冲突判定变为 per-state：仅同一 state 内对同类型用两个不同名才算冲突。
 - 顺带**消除**了上一版的进程级 `new[]` 泄漏；`lua_rawgetp/rawsetp` 为 5.1/luajit 提供 polyfill。
 - 代价：`LuaStack::get/put` 每次多一次 O(1) registry 查找。
+
+> **后续（TAG 移除）**：模板此前还带一个 `int TAG` 参数（`LuaClass<T, TAG>`），本意是让同一类型在同一 state 内绑定多个名字。但 `LuaStack<T>::get`（解析 `self`/参数）恒用 `LuaClass<T, 0>`，非零 `TAG` 的实例方法在调用时必然找不到 `self`——该特性从未真正工作。已彻底删除 `TAG` 模板参数；"不同 state 不同名"由 per-state registry 提供，与 `TAG` 无关。
 
 **遗留 / 未修**：
 - ~~M2 的遗留：存储的 `std::function` 在 holder userdata 回收时其析构仍未被调用（一次性 setup 期泄漏，非本轮 UB 问题；彻底修复需为 holder 加 `__gc`）。~~ **已修复（第四轮）**：见下。
@@ -116,9 +118,9 @@ luaL_error(state, "attempt to read Write-Only property '%s' of '%s'", luaL_optst
 - 建议：改用 placement new：`new (funPtr) F(f);`，并在对象析构/GC 时显式调用析构（若需要）。
 
 ### 【中危 M3】同一 C++ 类无法在两个并存的 `lua_State` 中绑定
-- 位置：`LuaClass<TCLASS,TAG>::klassName` 为 `static`（`luaaa.hpp:2121`）
+- 位置：`LuaClass<TCLASS>::klassName` 为 `static`（`luaaa.hpp:2121`）
 - 复现（`test_edge.cpp` B13）：在 L1 绑定 `Animal` 后，L2 再绑定同类型直接报冲突错误。
-- 影响：多 VM 场景（脚本沙箱、每线程一个 state）需要为每个 state 提供不同 `TAG`，否则默认失败；这是隐式的全局状态耦合。
+- 影响：多 VM 场景（脚本沙箱、每线程一个 state）默认失败；这是隐式的全局状态耦合。（已由上文 M3 增强的 per-state registry 修复。）
 - 建议：文档中显著说明该限制；或将 `klassName` 与注册信息改为按 `lua_State` 存储（如放入注册表）。
 
 ---

@@ -12,7 +12,7 @@ This guide is a reference and FAQ for people who already know the basics from th
 6. [Properties in depth](#properties-in-depth)
 7. [`def`: constants, arrays & embedded instances](#def-constants-arrays--embedded-instances)
 8. [Metamethods](#metamethods)
-9. [Multiple `lua_State`s & the `TAG` parameter](#multiple-lua_states--the-tag-parameter)
+9. [Multiple `lua_State`s](#multiple-lua_states)
 10. [Embedded / no-stdlib builds](#embedded--no-stdlib-builds)
 11. [Feature macros](#feature-macros)
 12. [Object lifetime & GC ownership](#object-lifetime--gc-ownership)
@@ -199,7 +199,7 @@ Three are special because luaaa uses them internally to implement properties and
 
 Property/method lookup order for an instance read (`obj.key`): bound methods & constants → registered getter → your `__index` (function or table) → *(if a setter exists)* write-only error → `nil`.
 
-## Multiple `lua_State`s & the `TAG` parameter
+## Multiple `lua_State`s
 
 luaaa stores each type's Lua name in a **per-state registry**, so the same C++ type can be exported under **different names in different states**:
 
@@ -210,8 +210,6 @@ LuaClass<Widget>(B, "Slider").ctor().fun("get", &Widget::get);  // state B
 ```
 
 Within a **single** state, a C++ type maps to exactly **one** Lua name. Binding the same type under a second name in the same state raises a conflict error. If you genuinely need two Lua views of one type in one state, wrap it in two distinct C++ types (e.g. trivial subclasses) — that is the reliable approach.
-
-The template also takes an integer `TAG` — `LuaClass<T, TAG>` — that gives `<T, TAG>` its own registry slot and metatable. It's useful for keeping separate bindings from colliding, **but note**: instance-method `self` is always resolved through `LuaClass<T, 0>`, so binding *instance methods* on a non-zero `TAG` will fail to find `self` at call time. Treat `TAG` as an advanced escape hatch, not a general "same type twice in one state" solution.
 
 ## Embedded / no-stdlib builds
 
