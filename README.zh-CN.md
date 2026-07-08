@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文** · 进阶指南：[GUIDE.md](GUIDE.md) | [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 
-**用一个头文件把 C++ 类和函数绑定到 Lua —— 无需代码生成，无需手写包装层。**
+**只需一个头文件，就能把 C++ 类和函数绑定到 Lua —— 不用生成代码，不用写包装层。**
 
 ```cpp
 LuaClass<Cat>(L, "Cat")
@@ -16,7 +16,7 @@ c:eat{ "fish", "milk" }
 c.name = "Bingo the Brave"
 ```
 
-核心就这么简单。下面由浅入深地带你走一遍。
+核心就这么简单。下面我们来一次由浅入深的完整导览。
 
 ---
 
@@ -40,31 +40,31 @@ c.name = "Bingo the Brave"
 
 ## 为什么用 luaaa
 
-* **单头文件。** 拷贝 `luaaa.hpp`，`#include` 即可，没有构建步骤、没有 `.cpp`、不依赖任何外部工具。
-* **无需包装。** 直接绑定你**现有**的类和函数，不用为绑定而重写它们。
-* **接口极小。** 三个名字几乎覆盖一切：`LuaClass`、`LuaModule`，以及（用于自定义类型的）`LuaStack`。
-* **自动转换。** 数字、字符串、`std::string` 以及所有标准容器都会在 C++ 与 Lua 之间自动转换。
-* **可移植。** 支持 Lua 5.1 – 5.4 与 LuaJIT，并提供一个不依赖 C++ 标准库的嵌入式模式。
+* **单头文件。** 把 `luaaa.hpp` 拷贝到项目里，然后 `#include` 就行。没有额外的构建步骤、没有 `.cpp`、不需要任何外部工具。
+* **不用包装。** 直接绑定你**已有的**类和函数，不用为了让它们能对接 Lua 而改写代码。
+* **接口极简。** 三个名字几乎覆盖所有场景：`LuaClass`、`LuaModule`，以及（自定义类型时用到的）`LuaStack`。
+* **自动类型转换。** 数字、字符串、`std::string` 以及所有标准容器，都会在 C++ 和 Lua 之间自动互转。
+* **跨平台可移植。** 支持 Lua 5.1 – 5.4 和 LuaJIT。还提供了一个不依赖 C++ 标准库的嵌入式模式。
 
 ## 环境要求
 
-* 一个 C++11 编译器（C++14 及以上会启用更快的 `std::tuple` 路径，但并非必需）。
-* Lua 5.1、5.2、5.3、5.4 或 LuaJIT —— 构建时能找到其头文件与库。
+* 支持 C++11 的编译器（C++14 及以上会自动启用更快的 `std::tuple` 转换路径，但不强制要求）。
+* Lua 5.1、5.2、5.3、5.4 或 LuaJIT —— 编译时能找到对应的头文件和库即可。
 
 ## 安装
 
-luaaa 是纯头文件库。把 `luaaa.hpp` 放进你的项目并包含它：
+luaaa 是纯头文件库，把 `luaaa.hpp` 放进你的项目然后引入就行：
 
 ```cpp
 #include "luaaa.hpp"
-using namespace luaaa;   // 可选，但本文示例默认已引入
+using namespace luaaa;   // 可选，但本文示例都默认写了这一行
 ```
 
-除了 Lua 和 C++ 标准库之外，它不依赖任何东西。
+它只依赖 Lua 和 C++ 标准库，除此之外什么都不需要。
 
 ## 快速开始
 
-假设你已经有这样一个普通的 C++ 类 —— 它对 Lua 一无所知：
+假设你已经有这样一个普通的 C++ 类 —— 它完全不知道 Lua 的存在：
 
 ```cpp
 class Cat {
@@ -79,67 +79,67 @@ private:
 };
 ```
 
-把它绑定到一个已经创建好的 `lua_State* L`：
+把它绑定到一个已经创建好的 `lua_State* L` 上：
 
 ```cpp
 #include "luaaa.hpp"
 using namespace luaaa;
 
 void bind(lua_State* L) {
-    LuaClass<Cat>(L, "Cat")          // 把 C++ 的 Cat 以 "Cat" 之名暴露给 Lua
-        .ctor<std::string>()          // 一个接收字符串的构造函数
-        .fun("eat", &Cat::eat)        // 一个方法
+    LuaClass<Cat>(L, "Cat")          // 把 C++ 的 Cat 类以 "Cat" 这个名字暴露给 Lua
+        .ctor<std::string>()          // 一个接收 string 的构造函数
+        .fun("eat", &Cat::eat)        // 一个成员方法
         .get("name", &Cat::name)      // 一个可读属性……
-        .set("name", &Cat::setName);  // ……它同时也可写
+        .set("name", &Cat::setName);  // ……同时也可写
 }
 ```
 
-现在 Lua 就能用它了 —— 传给 `eat` 的数组会自动变成 `std::list<std::string>`：
+现在 Lua 里就可以直接用这个类了 —— 注意传给 `eat` 的 Lua 数组会自动转换成 `std::list<std::string>`：
 
 ```lua
 local c = Cat.new("Bingo")     -- 调用 C++ 构造函数
-c:eat{ "fish", "milk" }        -- Lua 表 -> std::list<std::string>
+c:eat{ "fish", "milk" }        -- Lua 表自动转换为 std::list<std::string>
 print(c.name)                  --> Bingo
 c.name = "Bingo the Brave"     -- 调用 setName()
 ```
 
-对象的生命周期交由 Lua 的垃圾回收器管理：当 `c` 被回收时，`Cat` 的析构函数会被调用。
+对象的生命周期完全由 Lua 的垃圾回收（GC）来管理：当 `c` 被回收时，`Cat` 的析构函数会自动调用。
 
 ## 绑定成员函数与静态函数
 
-`fun` 能绑定任何可调用体：成员函数、`static` 成员、自由函数、lambda。
+`fun` 几乎什么都能绑：成员函数、`static` 成员函数、普通自由函数、lambda 表达式。
 
 ```cpp
 class Cat {
 public:
     void eat(const std::list<std::string>&);   // 成员函数
     static void meow(const std::string& who);  // 静态函数
-    std::string toString() const;              // 用于 __tostring
+    std::string toString() const;              // 供 __tostring 使用
 };
 
 LuaClass<Cat>(L, "Cat")
     .ctor<std::string>()
     .fun("eat",  &Cat::eat)
-    .fun("meow", &Cat::meow)              // 静态成员，绑定方式与普通方法相同
-    .fun("__tostring", &Cat::toString)    // Lua 元方法同样适用
-    .fun("play", [](int minutes) {        // lambda 也可以
-        printf("played for %d min\n", minutes);
+    .fun("meow", &Cat::meow)              // 静态成员，绑定方式跟普通方法一样
+    .fun("__tostring", &Cat::toString)    // Lua 元方法也一样可以绑
+    .fun("play", [](int minutes) {        // lambda 也没问题
+        printf("玩了 %d 分钟\n", minutes);
     });
 ```
 
 ```lua
 local c = Cat.new("Bingo")
 c:eat{ "fish" }
-c:meow("Bingo")        -- 静态成员同样通过实例来调用
-print(c)               -- __tostring：打印 "Bingo (1y)"
+c:meow("Bingo")        -- 静态函数也通过实例来调用
+print(c)               -- __tostring：输出 "Bingo (1y)"
 c:play(10)
 ```
 
-> 注意：用 `fun` 绑定的 `static`/自由函数是**当作方法来调用**的 —— `c:meow("Bingo")`。冒号前的实例会作为隐藏的 `self` 传入并被跳过，其余参数依次对应函数的形参。
+> 注意：用 `fun` 绑定的 `static` 或自由函数，在 Lua 里是**当作方法来调用**的 —— 写法是 `c:meow("Bingo")`。冒号前面的实例会被当成隐藏的 `self` 参数传入并自动跳过，剩下的实参会依次传给函数的形参。
 
 ## 构造函数
 
-每个类至少需要一个构造函数。模板参数就是 C++ 构造函数的形参类型；字符串是它在 Lua 侧的名字（默认为 `"new"`）。
+每个类至少要注册一个构造函数。模板参数填 C++ 构造函数需要的参数类型，字符串是它在 Lua 端的方法名（默认叫 `"new"`）。
 
 ```cpp
 LuaClass<Cat>(L, "Cat")
@@ -152,11 +152,11 @@ local a = Cat.new()
 local b = Cat.create("Tom")
 ```
 
-你可以用不同的名字注册多个构造函数。工厂函数、单例以及自定义析构器请见[进阶指南](GUIDE.zh-CN.md#构造函数详解)。
+你可以用不同的名字注册多个构造函数。工厂函数、单例模式、自定义析构器这些进阶用法，见[进阶指南](GUIDE.zh-CN.md#构造函数详解)。
 
 ## 属性
 
-`get` 和 `set` 把 C++ 的取值/赋值函数变成 Lua 的字段，于是 Lua 用普通的 `.字段` 语法就能读写它们。
+`get` 和 `set` 能把 C++ 的取值/赋值方法变成 Lua 的“字段”，让 Lua 用普通的 `.字段名` 语法就能读写。
 
 ```cpp
 LuaClass<Cat>(L, "Cat")
@@ -167,19 +167,19 @@ LuaClass<Cat>(L, "Cat")
 
 ```lua
 local c = Cat.new("Bingo")
-print(c.name)      -- 调用 name()
-c.age = 3          -- 调用 setAge(3)
+print(c.name)      -- 实际调用的是 name()
+c.age = 3          -- 实际调用的是 setAge(3)
 ```
 
-* 只有 getter → **只读**（写入会抛出 Lua 错误）。
-* 只有 setter → **只写**（读取会抛出 Lua 错误）。
-* 两者都有 → 可读可写。
+* 只配了 getter → **只读**（写入会报 Lua 错误）。
+* 只配了 setter → **只写**（读取会报 Lua 错误）。
+* 两者都配了 → 可读可写。
 
-getter 与 setter 也可以是自由函数或 lambda（可带、也可不带 `Cat&` 作为第一个参数）。详见[属性详解](GUIDE.zh-CN.md#属性详解)。
+getter 和 setter 也可以用自由函数或 lambda（第一个参数可以是 `Cat&`，也可以没有）。详见[属性详解](GUIDE.zh-CN.md#属性详解)。
 
 ## 模块与全局
 
-`LuaModule` 把自由函数和常量归拢到一个 Lua 表里 —— 适合那些不属于某个对象的东西。
+`LuaModule` 把一组自由函数和常量组织到一个 Lua 表里 —— 很适合放那些跟某个对象无关的东西。
 
 ```cpp
 void adopt(const std::string& name, std::function<void(const std::string&)> onDone);
@@ -192,10 +192,10 @@ LuaModule(L, "shelter")
 
 ```lua
 print(shelter.city)            --> Catville
-shelter.adopt("Bingo", function(who) print(who .. " adopted!") end)
+shelter.adopt("Bingo", function(who) print(who .. " 被领养了！") end)
 ```
 
-不给模块名（或用 `"_G"`），就能把东西直接放进 Lua 的全局：
+如果不给模块起名字（或者名字用 `"_G"`），里面的东西会直接放进 Lua 的全局空间：
 
 ```cpp
 LuaModule(L).def("pi", 3.14159);   // 全局的 pi
@@ -203,19 +203,19 @@ LuaModule(L).def("pi", 3.14159);   // 全局的 pi
 
 ## 在 Lua 中继承
 
-只要你绑定了任意一个类，luaaa 就会往那个 `lua_State` 注入两个辅助函数 —— 无需粘贴任何胶水代码：
+只要你绑定了任意一个类，luaaa 就会自动往当前 `lua_State` 中注入两个辅助函数 —— 不需要你自己写任何胶水代码：
 
-* `luaaa:extend(Base, fields)` —— 为一个已导出的类创建子类（`fields` 可选）。
-* `luaaa:base(obj)` —— 取得某个实例底层的 C++ 对象（用于调用被覆盖的方法）。
+* `luaaa:extend(Base, fields)` —— 基于一个已导出的类来创建子类，`fields` 是可选的新字段。
+* `luaaa:base(obj)` —— 获取某个实例底层的 C++ 对象，方便在重写方法后继续调用父类的实现。
 
 ```lua
 local SpecialCat = luaaa:extend(Cat, { tricks = 0 })
 
 function SpecialCat:learn() self.tricks = self.tricks + 1 end
 
-function SpecialCat:meow(who)          -- 覆盖……
-    print(self.name .. " purrs first")
-    luaaa:base(self):meow(who)         -- ……再调用 C++ 的方法
+function SpecialCat:meow(who)          -- 重写 meow……
+    print(self.name .. " 先发出咕噜声")
+    luaaa:base(self):meow(who)         -- ……再调用 C++ 原版的方法
 end
 
 local felix = SpecialCat:new("Felix")
@@ -225,36 +225,36 @@ felix:meow("Felix")
 
 ## 把 Lua 函数当作 C++ 回调
 
-C++ 函数可以接收一个 Lua 函数。只需把参数声明为 `std::function`（推荐）或普通函数指针：
+C++ 函数可以直接接收 Lua 端传过来的函数作为回调。把对应参数的类型声明为 `std::function`（推荐）或者普通的函数指针即可：
 
 ```cpp
-void onEach(std::function<int(int)> cb);   // 推荐
-void onEvent(int (*cb)(const char*));      // 原始指针（有限制）
+void onEach(std::function<int(int)> cb);   // 推荐：用 std::function
+void onEvent(int (*cb)(const char*));      // 限制较多：裸函数指针
 ```
 
 ```lua
 onEach(function(x) return x * 2 end)
 ```
 
-优先使用 `std::function` 形式：它自己持有对 Lua 函数的引用，因此可以被保存、拷贝、多次调用，并且可重入。两种形式的区别以及原始指针形式的注意事项，见[回调详解](GUIDE.zh-CN.md#回调详解)。
+建议优先用 `std::function` 形式。因为它会自己持有对 Lua 函数的引用，所以可以保存起来、拷贝多份、反复调用，还支持重入。两种形式的详细区别以及裸函数指针的注意事项，见[回调详解](GUIDE.zh-CN.md#回调详解)。
 
 ## 运行示例
 
-[`example/`](example/) 目录里有一个完整可运行的故事 —— *小小猫咪收容所*，外加一个嵌入式（不依赖标准库）版本 —— *喂食器节点*。
+[`example/`](example/) 目录里有一个完整可运行的故事 —— *小小猫咪收容所*，另外还有一个不依赖标准库的嵌入式版本 —— *喂食器节点*。
 
 ```bash
-bash example/build.sh            # 编译并运行两者
-bash example/build.sh desktop    # 只跑完整标准库示例
-bash example/build.sh embedded   # 只跑无标准库示例
+bash example/build.sh            # 编译并运行两个版本
+bash example/build.sh desktop    # 只跑标准库版本
+bash example/build.sh embedded   # 只跑嵌入式版本
 ```
 
-脚本会通过 `pkg-config` 自动探测 Lua。如果找不到你的 Lua，手动指定路径：
+构建脚本会通过 `pkg-config` 自动探测 Lua。如果找不到，手动指定路径即可：
 
 ```bash
 LUA_CFLAGS=-I/usr/include/lua5.4 LUA_LIBS=-llua5.4 bash example/build.sh
 ```
 
-或者手动编译：
+或者直接手写编译命令：
 
 ```bash
 cd example
@@ -263,18 +263,18 @@ c++ -std=c++11 example.cpp -I/usr/include/lua5.4 -llua5.4 -lm -o example && ./ex
 
 ## 下一步
 
-日常使用需要的东西你已经全部见过了。**[进阶指南](GUIDE.zh-CN.md)** 覆盖其余内容，可当作参考手册与 FAQ：
+到这里，日常使用需要掌握的内容你已经都了解了。**[进阶指南](GUIDE.zh-CN.md)** 覆盖了剩下的内容，可以作为参考手册或 FAQ 来查阅：
 
-* 自动类型转换，以及完整的容器 / `pair` / `tuple` 支持表
-* 用 `LuaStack` 教会 luaaa 你自己的类型
+* 自动类型转换，以及完整的容器 / `pair` / `tuple` 支持列表
+* 用 `LuaStack` 教会 luaaa 如何处理你自己的类型
 * 构造函数的各种形态：工厂、单例、自定义析构器、命名冲突
-* 重载函数与消歧
-* 回调详解（`std::function` 对比原始指针）
+* 重载函数的消歧
+* 回调详解（`std::function` vs 裸指针）
 * 元方法（`__index`、`__newindex`、`__gc`、`__tostring`）
-* 多个 `lua_State`
-* 面向单片机的**嵌入式 / 无标准库**构建
-* 特性宏、GC 所有权规则与排错
+* 同时使用多个 `lua_State`
+* 面向单片机等环境的**嵌入式 / 无标准库**构建
+* 特性宏、GC 所有权规则，以及常见问题排查
 
 ## 许可证
 
-MIT。见 [LICENSE](LICENSE)。
+MIT。详见 [LICENSE](LICENSE)。
