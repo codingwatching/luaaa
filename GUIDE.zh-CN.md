@@ -15,9 +15,10 @@
 9. [多个 `lua_State`](#多个-lua_state)
 10. [嵌入式 / 无标准库构建](#嵌入式--无标准库构建)
 11. [特性宏](#特性宏)
-12. [对象生命周期与 GC 所有权](#对象生命周期与-gc-所有权)
-13. [兼容性说明](#兼容性说明)
-14. [排错 / FAQ](#排错--faq)
+12. [字符串生命周期：`const char*` 与 `std::string`](#字符串生命周期const-char-与-stdstring)
+13. [对象生命周期与 GC 所有权](#对象生命周期与-gc-所有权)
+14. [兼容性说明](#兼容性说明)
+15. [排错 / FAQ](#排错--faq)
 
 ---
 
@@ -225,7 +226,7 @@ LuaClass<Widget>(B, "Slider").ctor().fun("get", &Widget::get);  // state B
 在这个模式下，**下面的特性不可用**（因为它们依赖 STL）：`std::string`、`std::function`、所有的 STL 容器转换、`std::tuple`/`std::pair`，以及 lambda 绑定（lambda 底层依赖 `std::function`）。
 
 **替代方案：**
-* 用 `const char*` 处理文本（在你的类里用定长缓冲区存放）。
+* 用 `const char*` 处理文本（在你的类里用定长缓冲区存放）。这些是指向 Lua VM 的借用 —— 参见[字符串生命周期](#字符串生命周期const-char-与-stdstring)，需在调用返回前拷贝到自有缓冲区。
 * 用 `def(name, array, length)` 把 C 数组变成 Lua 表。
 * 用**裸函数指针**接收回调（参见[回调详解](#回调详解)）。
 * 在方法参数里加上 `lua_State*`，手动从栈上读取表和参数：
@@ -266,6 +267,35 @@ void  operator delete(void* p) noexcept { free(p); }
 | `LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` | `1` | 两个构造函数使用了相同的 Lua 名字时打印警告。 |
 | `LUAAA_DEBUG` | `0` | 启用 `LUAAA_DUMP(L)` 栈内容转储的辅助功能。 |
 
+## 字符串生命周期：`const char*` 与 `std::string`
+
+`const char*` 参数（以及 `char*`，它只是对其做了 `const_cast`）是**向 Lua VM 借来的**。luaaa 用 `lua_tostring` 读取它，返回的是指向 Lua 内部字符串存储的指针。该指针仅在对应的 Lua 值存活期间有效 —— 实际上就是本次绑定调用的持续时间内（Lua 参数会留在栈上不弹出，直到你的函数返回）。一旦该值被弹出或被 GC 回收，指针就失效了。
+
+```cpp
+// 错误：把借来的指针存到调用之外 -> 悬垂
+static const char* g_name = nullptr;
+void set(const char* n) { g_name = n; }      // set() 返回后 g_name 即悬垂
+const char* get()       { return g_name; }   // use-after-free
+
+// 正确：用 std::string 拥有一份拷贝
+void set(std::string n) { g_name = std::move(n); }   // 深拷贝，可安全保留
+```
+
+**经验法则**：若字符串需要存活到调用结束之后，就用 `std::string` —— `LuaStack<std::string>` 会替你深拷贝字节。只有当你在调用内**立即**消费该文本（打印、比较、自行拷贝）时，才用 `const char*`。
+
+**嵌入式 / 无标准库构建**没有 `std::string`，借用是你唯一的选择。请在调用返回前拷贝到自有的定长缓冲区，正如 `example/embedded.cpp` 所做：
+
+```cpp
+class Feeder {
+    char m_id[32];
+public:
+    explicit Feeder(const char* id) { strncpy(m_id, id, sizeof(m_id) - 1); m_id[31] = '\0'; }
+    //                                                  ^^^^^^^^^^^^^^^ 自有拷贝，可安全保留
+};
+```
+
+这条借用规则同样适用于用 `lua_next` 从表里读出的 key（见[嵌入式构建](#嵌入式--无标准库构建)）以及任何直接由 `LuaStack<const char*>::get` 返回的值 —— 在下一次 `lua_pop` 之前消费掉它。
+
 ## 对象生命周期与 GC 所有权
 
 对象的析构由谁负责，取决于它是怎么进入 Lua 的：
@@ -276,14 +306,15 @@ void  operator delete(void* p) noexcept { free(p); }
 | `ctor(name, spawner)`（生成器） | `delete` 生成器返回的指针（如果 `T` 不可析构则什么事都不做） |
 | `ctor(name, spawner, deleter)`（生成器 + 自定义析构器） | GC 时调用你的 `deleter(T*)` |
 | `ctor(name, spawner, nullptr)`（生成器 + 空析构器） | Lua 永远不销毁它（借用/单例场景） |
-| 绑定函数以 `T*` 或 `T&` 返回 | 作为轻量引用压栈；Lua **不**拥有所有权，也不会回收它 |
+| 绑定函数以 `T*` 或 `T&` 返回 | 带类型的**非拥有别名**（full userdata，挂类 metatable，`dtor=nullptr`）；Lua 永远不销毁它 |
+| 绑定函数以 `T`（按值）返回 | 带类型的**拥有拷贝**；GC 时调用 `~T()` |
 
-把对象的指针/引用返回给 Lua，相当于给了 Lua 一个句柄，可以在别的绑定函数之间传来传去，但 Lua 不会管理它的生命周期 —— 它的存活需要你自己来保证。
+返回 `T*`/`T&` 会包装成携带类 metatable 的 full userdata：方法可以继续调用，回传时也会做类型检查（传错类会被拒绝，不再像过去的无类型 lightuserdata 那样照单全收）。它别名到 C++ 对象本体 —— 对象的存活需要你自己保证；`nullptr` 会变成 Lua 的 `nil`。按值返回 `T` 则拷贝构造进 userdata，由 GC 正常回收。指针/引用的类如果**没有**在该 state 绑定，仍退化为普通 lightuserdata（传统的透明句柄模式）；而未绑定类按值返回则会直接报错（而不是产生悬垂指针）。
 
 ## 兼容性说明
 
-* **Lua 版本。** 支持 5.1、5.2、5.3、5.4 以及 LuaJIT。针对 5.1/LuaJIT，luaaa 会自行补充它需要的少数 5.2+ 辅助函数（`luaL_setfuncs`、`lua_rawgetp` 等）。
-* **模块注册方式。** 在 Lua > 5.1 且没有定义 `LUA_COMPAT_MODULE` 的情况下，模块会以普通的全局表形式创建（现代风格）；否则走老的 `luaL_openlib` 路径。这一切都是自动判断的。
+* **Lua 版本。** 支持 5.1、5.2、5.3、5.4、5.5 以及 LuaJIT。针对 5.1/LuaJIT，luaaa 会自行补充它需要的少数 5.2+ 辅助函数（`luaL_setfuncs`、`lua_rawgetp`，以及面向 PUC 5.1 的 `lua_tonumberx`/`lua_tointegerx` 封装 —— PUC 5.1 没有这两个 API，LuaJIT 则自带）。
+* **模块注册方式。** 在 Lua > 5.1 且没有定义 `LUA_COMPAT_MODULE` 的情况下，模块会以普通的全局表形式创建（现代风格）；否则走老的 `luaL_openlib` 路径。这一切都是自动判断的。模块 property 在两条路径下都可用，包括绑定到**预先已存在**的表（比如默认的 `_G` 模块，或者脚本里先 `M = {}` 再绑定的表）；唯一的例外是那张表已经挂着别人安装的 metatable —— luaaa 不会覆盖它，模块 property 在那里保持不可用。
 * **C++ 标准。** 最低要求 C++11。C++14 及以上会启用更快的 `std::tuple` 转换路径；同时也带了 C++11 的备选方案，所以 tuple 在两种标准下都能用。
 
 ## 排错 / FAQ
@@ -291,6 +322,8 @@ void  operator delete(void* p) noexcept { free(p); }
 **`cpp class 'X' not export`** —— luaaa 被要求转换一个它还没有绑定或特化的类型。常见原因：(1) 你在当前 state 里的 `LuaClass<X>` 构造完成之前就调用了方法；(2) 绑定的函数签名中用到了没有特化的标量类型（比如 `enum` 或裸结构体）—— 给它补一个 `LuaStack` 就行；(3) 你把这个对象用在了跟绑定时不同的 `lua_State` 里。
 
 **`C++ class '...' bind to conflict lua name`** —— 你在同一个 state 里把同一个 C++ 类型绑定到了两个不同的 Lua 名字。解决方法：每个 state 用一个名字；或者用不同的 state；或者把它封装成不同的包装类型（参见[多个 lua_State](#多个-lua_state)）。
+
+**`lua name '...' already bound to a different cpp class`** —— 反过来的冲突：两个**不同**的 C++ 类型试图在同一个 state 里共用同一个 Lua 名字。那样它们会静默共享同一个 metatable（并且互相通过对方的类型检查），所以 luaaa 直接拒绝第二次绑定。给每个类型各起一个名字即可。
 
 **静态方法用 `Class.method()` 调用报 "nil value"** —— 通过 `fun` 绑定的静态/自由函数是按方法方式调用的，所以要用 `instance:method(args)` 的写法。冒号前面的实例充当被跳过的 `self`。
 

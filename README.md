@@ -43,13 +43,13 @@ That's the whole idea. Keep reading for a gentle, top-to-bottom tour.
 * **One header.** Copy `luaaa.hpp`, `#include` it, done. No build step, no `.cpp`, no external tool.
 * **No wrappers.** Bind your *existing* classes and functions directly — you don't rewrite them.
 * **Small surface.** Three names do almost everything: `LuaClass`, `LuaModule`, and (for custom types) `LuaStack`.
-* **Automatic conversions.** Numbers, strings, `std::string`, and every standard container flow between C++ and Lua for you.
-* **Portable.** Works with Lua 5.1 – 5.4 and LuaJIT, and has an embedded mode with no C++ standard library.
+* **Automatic conversions.** Numbers, strings, `std::string`, and every standard container flow between C++ and Lua for you. (`const char*` args are borrowed from Lua and valid only for the call — use `std::string` to keep a string; see Guide → String lifetime.)
+* **Portable.** Works with Lua 5.1 – 5.5 and LuaJIT, and has an embedded mode with no C++ standard library.
 
 ## Requirements
 
 * A C++11 compiler (C++14 or newer unlocks a faster `std::tuple` path; still optional).
-* Lua 5.1, 5.2, 5.3, 5.4, or LuaJIT — headers and library available to your build.
+* Lua 5.1, 5.2, 5.3, 5.4, 5.5, or LuaJIT — headers and library available to your build.
 
 ## Install
 

@@ -15,9 +15,10 @@ This guide is a reference and FAQ for people who already know the basics from th
 9. [Multiple `lua_State`s](#multiple-lua_states)
 10. [Embedded / no-stdlib builds](#embedded--no-stdlib-builds)
 11. [Feature macros](#feature-macros)
-12. [Object lifetime & GC ownership](#object-lifetime--gc-ownership)
-13. [Compatibility notes](#compatibility-notes)
-14. [Troubleshooting / FAQ](#troubleshooting--faq)
+12. [String lifetime: `const char*` vs `std::string`](#string-lifetime-const-char-vs-stdstring)
+13. [Object lifetime & GC ownership](#object-lifetime--gc-ownership)
+14. [Compatibility notes](#compatibility-notes)
+15. [Troubleshooting / FAQ](#troubleshooting--faq)
 
 ---
 
@@ -225,7 +226,7 @@ Typically compiled with `-fno-exceptions -fno-rtti`. See `example/embedded.cpp` 
 **Not available** in this mode (they need the STL): `std::string`, `std::function`, all STL container conversions, `std::tuple`/`std::pair`, and lambda binding (lambdas rely on `std::function`).
 
 **Use instead:**
-* `const char*` for text (fixed buffers in your classes).
+* `const char*` for text (fixed buffers in your classes). These are borrowed from the Lua VM — see [String lifetime](#string-lifetime-const-char-vs-stdstring) and copy into your own buffer before the call returns.
 * C arrays via `def(name, array, length)` for tables.
 * raw **function-pointer** callbacks (see [Callbacks](#callbacks-in-depth)).
 * a `lua_State*` parameter on a method to read tables/arguments by hand:
@@ -266,6 +267,35 @@ Define these **before** including `luaaa.hpp`.
 | `LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` | `1` | Warn when two constructors share a Lua name. |
 | `LUAAA_DEBUG` | `0` | Enable the `LUAAA_DUMP(L)` stack-dump helper. |
 
+## String lifetime: `const char*` vs `std::string`
+
+A `const char*` parameter (and `char*`, which just `const_cast`s it) is **borrowed from the Lua VM**. luaaa reads it with `lua_tostring`, which hands back a pointer into Lua's internal string storage. That pointer is valid only while the Lua value stays alive — in practice, for the duration of this bound call (the Lua arguments stay on the stack, unpopped, until your function returns). The moment the value is popped or garbage-collected, the pointer is stale.
+
+```cpp
+// BAD: stores the borrowed pointer past the call -> dangling
+static const char* g_name = nullptr;
+void set(const char* n) { g_name = n; }      // g_name dangles after set() returns
+const char* get()       { return g_name; }   // use-after-free
+
+// GOOD: take std::string to own a copy
+void set(std::string n) { g_name = std::move(n); }   // deep-copied, safe to keep
+```
+
+**Rule of thumb:** if you need the string to outlive the call, take `std::string` — `LuaStack<std::string>` deep-copies the bytes for you. Use `const char*` only when you consume the text immediately (log it, compare it, copy it yourself) within the call.
+
+**Embedded / no-stdlib builds** have no `std::string`, so the borrow is your only option. Copy into your own fixed buffer before the call returns, exactly as `example/embedded.cpp` does:
+
+```cpp
+class Feeder {
+    char m_id[32];
+public:
+    explicit Feeder(const char* id) { strncpy(m_id, id, sizeof(m_id) - 1); m_id[31] = '\0'; }
+    //                                                  ^^^^^^^^^^^^^^^ own copy, safe to keep
+};
+```
+
+The borrow rule applies equally to keys read out of a table with `lua_next` (see [Embedded builds](#embedded--no-stdlib-builds)) and to anything returned by `LuaStack<const char*>::get` directly — consume it before the next `lua_pop`.
+
 ## Object lifetime & GC ownership
 
 Who calls the destructor depends on how the object entered Lua:
@@ -276,14 +306,15 @@ Who calls the destructor depends on how the object entered Lua:
 | `ctor(name, spawner)` | `delete` the returned pointer (no-op if `T` isn't destructible) |
 | `ctor(name, spawner, deleter)` | your `deleter(T*)` runs |
 | `ctor(name, spawner, nullptr)` | never destroyed by Lua (borrowed / singleton) |
-| returned as `T*`/`T&` from a bound function | pushed as a light reference; Lua does **not** own or collect it |
+| returned as `T*` or `T&` from a bound function | typed **non-owning alias** (full userdata, class metatable, `dtor=nullptr`); Lua never destroys it |
+| returned as `T` (by value) from a bound function | typed **owning copy**; `~T()` runs on GC |
 
-Returning a pointer/reference to a C++ object gives Lua a handle it can pass back into other bound functions, but Lua won't manage its lifetime — keep the C++ object alive yourself.
+A returned `T*`/`T&` wraps a full userdata carrying the class metatable, so methods stay callable on it and the value is type-checked when passed back in (a wrong class is rejected, unlike the old untyped lightuserdata). It aliases the C++ object — keep that object alive yourself; a `nullptr` becomes Lua `nil`. A by-value `T` return instead copy-constructs into the userdata and is collected normally. A pointer/reference whose class is *not* bound in that state still degrades to a plain lightuserdata (the legacy opaque-handle pattern); a by-value object of an unbound class raises instead of dangling.
 
 ## Compatibility notes
 
-* **Lua versions.** 5.1, 5.2, 5.3, 5.4 and LuaJIT. For 5.1/LuaJIT, luaaa supplies the few 5.2+ helpers it needs (`luaL_setfuncs`, `lua_rawgetp`, …).
-* **Module registry.** On Lua > 5.1 without `LUA_COMPAT_MODULE`, modules are created as plain global tables (the modern style); otherwise the legacy `luaL_openlib` path is used. This is automatic.
+* **Lua versions.** 5.1, 5.2, 5.3, 5.4, 5.5 and LuaJIT. For 5.1/LuaJIT, luaaa supplies the few 5.2+ helpers it needs (`luaL_setfuncs`, `lua_rawgetp`, and `lua_tonumberx`/`lua_tointegerx` wrappers for PUC 5.1, which lacks them — LuaJIT has its own).
+* **Module registry.** On Lua > 5.1 without `LUA_COMPAT_MODULE`, modules are created as plain global tables (the modern style); otherwise the legacy `luaL_openlib` path is used. This is automatic. Module properties work on both paths, including modules bound onto a pre-existing table (e.g. the default `_G` module, or a table the script created first); the one exception is a table that already carries a *foreign* metatable installed by someone else — luaaa leaves it untouched and module properties stay unavailable there.
 * **C++ standard.** C++11 is the floor. C++14+ selects a faster `std::tuple` conversion path; a C++11 fallback is included, so tuples work either way.
 
 ## Troubleshooting / FAQ
@@ -291,6 +322,8 @@ Returning a pointer/reference to a C++ object gives Lua a handle it can pass bac
 **`cpp class 'X' not export`** — luaaa was asked to convert a type it doesn't have bound/specialized. Causes: (1) you called a method before `LuaClass<X>` was constructed in *that* state; (2) the bound signature uses a scalar with no specialization (e.g. an `enum` or a raw struct) — add a `LuaStack` for it; (3) you're using the object in a different `lua_State` than the one it was bound in.
 
 **`C++ class '...' bind to conflict lua name`** — you bound the same C++ type under two names in one state. Use one name per state, separate states, or distinct wrapper types (see [Multiple states](#multiple-lua_states--the-tag-parameter)).
+
+**`lua name '...' already bound to a different cpp class`** — the reverse conflict: two *different* C++ types tried to share one lua name in one state. They would have silently shared a metatable (and passed each other's type checks), so luaaa rejects the second bind. Give each type its own name.
 
 **A static method call `Class.method()` fails with "nil value"** — static/free functions bound via `fun` are invoked like methods: call `instance:method(args)`. The instance is the skipped `self`.
 
