@@ -16,10 +16,6 @@
 *.dylib
 *.dll
 
-# Fortran module files
-*.mod
-*.smod
-
 # Compiled Static libraries
 *.lai
 *.la
@@ -32,8 +28,12 @@
 *.app
 
 # Others
+.DS_Store
 .vs
 .vscode
+.zcode/
+.claude/
+.remember/
 example/example
 example/vs2015
 example/example
